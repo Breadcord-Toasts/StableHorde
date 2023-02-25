@@ -1,0 +1,9 @@
+manifest_version = 1
+
+[module]
+name = "Stable Horde"
+id = "stable_horde"
+description = "Generate images using the stable horde"
+version = "1.0.0"
+license = "GNU GPLv3"
+authors = ["Fripe"]

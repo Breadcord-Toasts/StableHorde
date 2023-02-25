@@ -1,0 +1,4 @@
+# Your stable horde api key
+# This will work if left as the default (0000000000), but should be changed to one obtained from the website
+# https://stablehorde.net/
+stable_horde_api_key = "0000000000"

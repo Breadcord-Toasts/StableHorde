@@ -18,6 +18,26 @@ from .helpers.types import (
 from .helpers.utils import ImageGenerationInputParams, ImageGenerationInput, remove_payload_none_values, GeneratedImage
 
 
+class DeleteButton(discord.ui.View):
+    def __init__(self, required_votes: int):
+        super().__init__()
+        self.required_votes = required_votes
+        self.votes = []
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, emoji="\N{WASTEBASKET}")
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if (user := interaction.user.id) not in self.votes:
+            self.votes.append(user)
+
+        vote_count = len(self.votes)
+        button.label = f"Delete ({vote_count}/{self.required_votes})"
+        
+        if vote_count >= self.required_votes:
+            return await interaction.response.edit_message(attachments=[], view=None)
+
+        await interaction.response.edit_message(view=self)
+
+
 class StableHorde(breadcord.module.ModuleCog):
     def __init__(self, module_id: str):
         super().__init__(module_id)
@@ -62,7 +82,7 @@ class StableHorde(breadcord.module.ModuleCog):
             "params": {
                 "samples": 50,
                 "cfg_scale": 7.5,
-            }
+            },
         }
         payload = deep_update(payload_base, remove_payload_none_values(dict(input_params)))
 
@@ -93,7 +113,7 @@ class StableHorde(breadcord.module.ModuleCog):
             description=cleandoc(
                 f"""
                 **Prompt:** {input_data.prompt}
-                **Model:** {input_data.models[0]}
+                **Model:** {input_data.models[0] if input_data.models else 'any'}
                 **Queue Position:** {generation_data["queue_position"]}
                 **Estimated time left:** {generation_data['wait_time']}s
                 """
@@ -146,7 +166,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 return (
                     None
                     if "generations" not in data
-                    else [GeneratedImage(**generated_image) for generated_image in data["generations"]] # type: ignore
+                    else [GeneratedImage(**generated_image) for generated_image in data["generations"]]  # type: ignore
                 )
 
             await interaction.edit_original_response(
@@ -154,23 +174,23 @@ class StableHorde(breadcord.module.ModuleCog):
             )
             await asyncio.sleep(2)
 
-    @app_commands.command()
-    @app_commands.autocomplete(model=model_autocomplete) # type: ignore
+    @app_commands.command(description="Generate an image using AI")
+    @app_commands.autocomplete(model=model_autocomplete)  # type: ignore
     @app_commands.describe(
-        prompt = "The prompt to feed to the image.",
-        model = "What model to use when generating the image",
-        seed = "The random seed the AI should use",
-        cfg_scale = "How much the Ai should follow your prompt, higher values means more accurate, but less reactive",
-        should_tile = "If the generated image should be tillable, mostly useful for textures",
-        is_nsfw = "If you think the image will be NSFW. THis will spoiler the output image",
-        use_gfpgan = "GFPGAN helps improve faces, mostly useful if you're going for a realistic look",
-        steps = "How many steps should be taken when generating the image",
+        prompt="The prompt to feed to the image.",
+        model="What model to use when generating the image",
+        seed="The random seed the AI should use",
+        cfg_scale="How much the Ai should follow your prompt, higher values means more accurate, but less reactive",
+        should_tile="If the generated image should be tillable, mostly useful for textures",
+        is_nsfw="If you think the image will be NSFW. THis will spoiler the output image",
+        use_gfpgan="GFPGAN helps improve faces, mostly useful if you're going for a realistic look",
+        steps="How many steps should be taken when generating the image",
     )
     async def ai_gen(
         self,
         interaction: discord.Interaction,
         prompt: str,
-        model: str = "stable_diffusion",
+        model: str = "",
         seed: str | None = None,
         cfg_scale: float | None = None,
         should_tile: bool | None = None,
@@ -182,7 +202,7 @@ class StableHorde(breadcord.module.ModuleCog):
 
         generation_input = ImageGenerationInput(
             prompt=prompt,
-            models=[model],
+            models=[model] if model else None,
             nsfw=is_nsfw,
             censor_nsfw=False,
             params=ImageGenerationInputParams(
@@ -197,9 +217,17 @@ class StableHorde(breadcord.module.ModuleCog):
         await interaction.response.send_message("Starting generation...")
         images = await self.generate_images(interaction, generation_input)
         embed = await self.create_finished_embed(images[0], generation_input, interaction.user)
-        files = [discord.File(image.img, filename=f"{'SPOILER_' if generation_input.nsfw else ''}generated_image.webp") for image in images]
+        files = [
+            discord.File(image.img, filename=f"{'SPOILER_' if generation_input.nsfw else ''}generated_image.webp")
+            for image in images
+        ]
 
-        await interaction.edit_original_response(content="", embed=embed, attachments=files)
+        await interaction.edit_original_response(
+            content="",
+            embed=embed,
+            attachments=files,
+            view=DeleteButton(self.module_settings.required_deletion_votes.value),
+        )
 
 
 async def setup(bot: breadcord.Bot):

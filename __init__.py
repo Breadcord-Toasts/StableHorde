@@ -157,8 +157,9 @@ class StableHorde(breadcord.module.ModuleCog):
 
         done = False
         while not done:
+            await asyncio.sleep(3)
             data = await self.request_generation_status(uuid)
-            if "message" in data or data["faulted"]:
+            if "message" in data or data["faulted"] or not data["is_possible"]:
                 return None
             if done := data["done"]:
                 data = await self.request_generation_status(uuid, with_images=True)
@@ -172,7 +173,6 @@ class StableHorde(breadcord.module.ModuleCog):
             await interaction.edit_original_response(
                 embed=await self.create_generating_embed(data, input_params, interaction.user)
             )
-            await asyncio.sleep(2)
 
     @app_commands.command(description="Generate an image using AI")
     @app_commands.autocomplete(model=model_autocomplete)  # type: ignore

@@ -196,7 +196,7 @@ class StableHorde(breadcord.module.ModuleCog):
         should_tile: bool | None = None,
         is_nsfw: bool = False,
         use_gfpgan: bool | None = None,
-        steps: int = 50,
+        steps: int = 30,
     ):
         model = re.sub(r" \([0-9]+ available\)$", "", model)
 

@@ -155,15 +155,15 @@ class StableHorde(breadcord.module.ModuleCog):
             return None
         uuid = image_request["id"]
 
-        done = False
-        while not done:
-            await asyncio.sleep(3)
+        cycle_wait_time = 3
+        for _ in range(10 * 60 // cycle_wait_time):
+            await asyncio.sleep(cycle_wait_time)
             data = await self.request_generation_status(uuid)
+
             if "message" in data or data["faulted"] or not data["is_possible"]:
                 return None
-            if done := data["done"]:
+            if data["done"]:
                 data = await self.request_generation_status(uuid, with_images=True)
-
                 return (
                     None
                     if "generations" not in data

@@ -31,7 +31,7 @@ class DeleteButton(discord.ui.View):
 
         vote_count = len(self.votes)
         button.label = f"Delete ({vote_count}/{self.required_votes})"
-        
+
         if vote_count >= self.required_votes:
             return await interaction.response.edit_message(attachments=[], view=None)
 
@@ -216,6 +216,12 @@ class StableHorde(breadcord.module.ModuleCog):
 
         await interaction.response.send_message("Starting generation...")
         images = await self.generate_images(interaction, generation_input)
+        if images is None:
+            await interaction.edit_original_response(
+                embed=discord.Embed(title="Generation failed.", colour=discord.Colour.red())
+            )
+            return
+
         embed = await self.create_finished_embed(images[0], generation_input, interaction.user)
         files = [
             discord.File(image.img, filename=f"{'SPOILER_' if generation_input.nsfw else ''}generated_image.webp")

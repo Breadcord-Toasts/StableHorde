@@ -177,7 +177,7 @@ class StableHorde(breadcord.module.ModuleCog):
     @app_commands.command(description="Generate an image using AI")
     @app_commands.autocomplete(model=model_autocomplete)  # type: ignore
     @app_commands.describe(
-        prompt="The prompt to feed to the image.",
+        prompt="The prompt to feed to the image. anything after ### will be treated as the negative prompt",
         model="What model to use when generating the image",
         seed="The random seed the AI should use",
         cfg_scale="How much the Ai should follow your prompt, higher values means more accurate, but less reactive",

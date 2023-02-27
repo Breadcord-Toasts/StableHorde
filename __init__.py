@@ -67,13 +67,12 @@ class StableHorde(breadcord.module.ModuleCog):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        matches = []
-        for model in self.available_models:
-            name: str = f"{model['name']} ({model['count']} available)"
-            if current.lower() in name.lower():
-                matches.append(name)
-
-        return [app_commands.Choice(name=match, value=match) for match in matches[:25]]
+        available_models = [model["name"].lower() for model in self.available_models]
+        matching_models = [model for model in self.available_models if current.lower().lower() in available_models]
+        return [
+            app_commands.Choice(name=f"{model['name']} ({model['count']} available)", value=model["name"])
+            for model in matching_models[:25]
+        ]
 
     async def request_image(self, input_params: ImageGenerationInput) -> ImageRequestResponse | RequestFail:
         payload_base = {

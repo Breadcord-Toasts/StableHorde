@@ -32,7 +32,7 @@ class DeleteButton(discord.ui.View):
         vote_count = len(self.votes)
         button.label = f"Delete ({vote_count}/{self.required_votes})"
 
-        if vote_count >= self.required_votes:
+        if interaction.guild is None or vote_count >= min(self.required_votes, interaction.guild.member_count):
             return await interaction.response.edit_message(attachments=[], view=None)
 
         await interaction.response.edit_message(view=self)

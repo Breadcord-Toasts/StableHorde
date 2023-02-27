@@ -4,5 +4,5 @@
 stable_horde_api_key = "0000000000"
 
 # How many votes are needed for a generated image to be deleted, useful in case it happens to be NSFW
+# Set to -1 to disable image deletion
 required_deletion_votes = 2
-

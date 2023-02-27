@@ -227,11 +227,12 @@ class StableHorde(breadcord.module.ModuleCog):
             for image in images
         ]
 
+        required_reactions = self.module_settings.required_deletion_votes.value
         await interaction.edit_original_response(
             content="",
             embed=embed,
             attachments=files,
-            view=DeleteButton(self.module_settings.required_deletion_votes.value),
+            view=DeleteButton(required_reactions) if required_reactions != -1 else None,
         )
 
 

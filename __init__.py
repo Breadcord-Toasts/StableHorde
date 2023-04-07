@@ -73,8 +73,6 @@ class StableHorde(breadcord.module.ModuleCog):
                         value=model["name"]
                     )
                 )
-
-        print(f"{choices = }")
         return choices
 
         # available_models = [model["name"].lower() for model in self.available_models]

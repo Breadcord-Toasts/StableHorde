@@ -9,13 +9,8 @@ from discord.ext import tasks
 from pydantic.utils import deep_update
 
 import breadcord
-from .helpers.types import (
-    RequestFail,
-    ImageRequestResponse,
-    GenerationCheckResponse,
-    GenerationStatusResponse,
-)
-from .helpers.utils import ImageGenerationInputParams, ImageGenerationInput, remove_payload_none_values, GeneratedImage
+from .helpers.types import *
+from .helpers.utils import *
 
 
 class DeleteButton(discord.ui.View):
@@ -41,7 +36,6 @@ class DeleteButton(discord.ui.View):
 class StableHorde(breadcord.module.ModuleCog):
     def __init__(self, module_id: str):
         super().__init__(module_id)
-        self.module_settings = self.bot.settings.get_child(module_id)
         self.api_base = "/api/v2"
 
         self.session = None
@@ -51,10 +45,10 @@ class StableHorde(breadcord.module.ModuleCog):
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession("https://stablehorde.net")
 
-    def cog_unload(self):
+    async def cog_unload(self):
         self.update_models.cancel()
         if self.session is not None:
-            self.session.close()
+            await self.session.close()
 
     @tasks.loop(hours=24)
     async def update_models(self) -> None:
@@ -78,16 +72,12 @@ class StableHorde(breadcord.module.ModuleCog):
         payload_base = {
             "shared": True,
             "r2": False,
-            "params": {
-                "samples": 50,
-                "cfg_scale": 7.5,
-            },
         }
         payload = deep_update(payload_base, remove_payload_none_values(dict(input_params)))
 
         async with self.session.post(
             f"{self.api_base}/generate/async",
-            headers={"apikey": self.module_settings.stable_horde_api_key.value},
+            headers={"apikey": self.settings.stable_horde_api_key.value},
             json=payload,
         ) as response:
             return await response.json()
@@ -191,11 +181,11 @@ class StableHorde(breadcord.module.ModuleCog):
         prompt: str,
         model: str = "",
         seed: str | None = None,
-        cfg_scale: float | None = None,
+        cfg_scale: float = 7.5,
         should_tile: bool | None = None,
         is_nsfw: bool = False,
         use_gfpgan: bool | None = None,
-        steps: int = 30,
+        steps: int | None = None,
     ):
         model = re.sub(r" \([0-9]+ available\)$", "", model)
 
@@ -205,7 +195,7 @@ class StableHorde(breadcord.module.ModuleCog):
             nsfw=is_nsfw,
             censor_nsfw=False,
             params=ImageGenerationInputParams(
-                steps=min(50, steps),
+                steps=min(50, steps) if steps is not None else None,
                 seed=seed,
                 cfg_scale=cfg_scale,
                 tiling=should_tile,
@@ -227,7 +217,7 @@ class StableHorde(breadcord.module.ModuleCog):
             for image in images
         ]
 
-        required_reactions = self.module_settings.required_deletion_votes.value
+        required_reactions = self.settings.required_deletion_votes.value
         await interaction.edit_original_response(
             content="",
             embed=embed,

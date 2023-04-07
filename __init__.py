@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 from inspect import cleandoc
 
@@ -55,18 +56,33 @@ class StableHorde(breadcord.module.ModuleCog):
         async with self.session.get(f"{self.api_base}/status/models", params={"type": "image"}) as response:
             self.available_models = await response.json()
 
-    # noinspection PyUnusedLocal
     async def model_autocomplete(
         self,
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        available_models = [model["name"].lower() for model in self.available_models]
-        matching_models = [model for model in self.available_models if current.lower().lower() in available_models]
-        return [
-            app_commands.Choice(name=f"{model['name']} ({model['count']} available)", value=model["name"])
-            for model in matching_models[:25]
-        ]
+        choices: list[app_commands.Choice[str]] = []
+        for model in sorted(self.available_models, key=lambda m: m["count"], reverse=True):
+            if len(choices) > 15:
+                break
+
+            if current.lower() in model["name"].lower():
+                choices.append(
+                    app_commands.Choice(
+                        name=f"{model['name']} ({model['count']} available)",
+                        value=model["name"]
+                    )
+                )
+
+        print(f"{choices = }")
+        return choices
+
+        # available_models = [model["name"].lower() for model in self.available_models]
+        # matching_models = [model for model in self.available_models if current.lower().lower() in available_models]
+        # return [
+        #     app_commands.Choice(name=f"{model['name']} ({model['count']} available)", value=model["name"])
+        #     for model in matching_models[:25]
+        # ]
 
     async def request_image(self, input_params: ImageGenerationInput) -> ImageRequestResponse | RequestFail:
         payload_base = {
@@ -187,7 +203,7 @@ class StableHorde(breadcord.module.ModuleCog):
         use_gfpgan: bool | None = None,
         steps: int | None = None,
     ):
-        model = re.sub(r" \([0-9]+ available\)$", "", model)
+        model = re.sub(r" \([0-9]+ available\)$", "", model.strip())
 
         generation_input = ImageGenerationInput(
             prompt=prompt,

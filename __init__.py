@@ -1,5 +1,4 @@
 import asyncio
-import random
 import re
 from inspect import cleandoc
 
@@ -56,6 +55,7 @@ class StableHorde(breadcord.module.ModuleCog):
         async with self.session.get(f"{self.api_base}/status/models", params={"type": "image"}) as response:
             self.available_models = await response.json()
 
+    # noinspection PyUnusedLocal
     async def model_autocomplete(
         self,
         interaction: discord.Interaction,

@@ -81,6 +81,7 @@ class ImageGenerationInput:
             elif value is not None:
                 yield attr, value
 
+
 class GeneratedImage:
     # noinspection PyShadowingBuiltins
     def __init__(
@@ -102,7 +103,6 @@ class GeneratedImage:
         self.state = state
         self.seed = seed
         self.censored = censored
-
 
 
 def remove_payload_none_values(dict_input: dict) -> dict:

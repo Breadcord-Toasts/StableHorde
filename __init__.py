@@ -59,28 +59,19 @@ class StableHorde(breadcord.module.ModuleCog):
     async def model_autocomplete(
         self,
         interaction: discord.Interaction,
-        current: str,
+        current: str
     ) -> list[app_commands.Choice[str]]:
-        choices: list[app_commands.Choice[str]] = []
-        for model in sorted(self.available_models, key=lambda m: m["count"], reverse=True):
-            if len(choices) > 15:
-                break
-
-            if current.lower() in model["name"].lower():
-                choices.append(
-                    app_commands.Choice(
-                        name=f"{model['name']} ({model['count']} available)",
-                        value=model["name"]
-                    )
-                )
-        return choices
-
-        # available_models = [model["name"].lower() for model in self.available_models]
-        # matching_models = [model for model in self.available_models if current.lower().lower() in available_models]
-        # return [
-        #     app_commands.Choice(name=f"{model['name']} ({model['count']} available)", value=model["name"])
-        #     for model in matching_models[:25]
-        # ]
+        return [
+            app_commands.Choice(
+                name=f"{model['name']} ({model['count']} available)",
+                value=model['name']
+            )
+            for model in breadcord.helpers.search_for(
+                current,
+                self.available_models,
+                key=lambda model: model["name"]
+            )
+        ]
 
     async def request_image(self, input_params: ImageGenerationInput) -> ImageRequestResponse | RequestFail:
         payload_base = {

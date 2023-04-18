@@ -55,25 +55,7 @@ class StableHorde(breadcord.module.ModuleCog):
         async with self.session.get(f"{self.api_base}/status/models", params={"type": "image"}) as response:
             self.available_models = await response.json()
 
-    # noinspection PyUnusedLocal
-    async def model_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str
-    ) -> list[app_commands.Choice[str]]:
-        return [
-            app_commands.Choice(
-                name=f"{model['name']} ({model['count']} available)",
-                value=model['name']
-            )
-            for model in breadcord.helpers.search_for(
-                current,
-                self.available_models,
-                key=lambda model: model["name"]
-            )
-        ]
-
-    async def request_image(self, input_params: ImageGenerationInput) -> ImageRequestResponse | RequestFail:
+    async def _request_image(self, input_params: ImageGenerationInput) -> ImageRequestResponse | RequestFail:
         payload_base = {
             "shared": True,
             "r2": False,
@@ -87,7 +69,7 @@ class StableHorde(breadcord.module.ModuleCog):
         ) as response:
             return await response.json()
 
-    async def request_generation_status(
+    async def _request_generation_status(
         self, generation_id: str, /, *, with_images: bool = False
     ) -> RequestFail | GenerationCheckResponse | GenerationStatusResponse:
         api_endpoint = f"{self.api_base}/generate/{'status' if with_images else 'check'}/{generation_id}"
@@ -95,7 +77,7 @@ class StableHorde(breadcord.module.ModuleCog):
             return await response.json()
 
     @staticmethod
-    async def create_generating_embed(
+    async def _create_generating_embed(
         generation_data: GenerationCheckResponse,
         input_data: ImageGenerationInput,
         author: discord.User | discord.Member,
@@ -117,7 +99,7 @@ class StableHorde(breadcord.module.ModuleCog):
         return embed
 
     @staticmethod
-    async def create_finished_embed(
+    async def _create_finished_embed(
         image_data: GeneratedImage,
         input_data: ImageGenerationInput,
         author: discord.User | discord.Member,
@@ -139,12 +121,12 @@ class StableHorde(breadcord.module.ModuleCog):
 
         return embed
 
-    async def generate_images(
+    async def _generate_images(
         self,
         interaction: discord.Interaction,
         input_params: ImageGenerationInput,
     ) -> list[GeneratedImage, ...] | None:
-        image_request = await self.request_image(input_params)
+        image_request = await self._request_image(input_params)
         if "id" not in image_request:
             return None
         uuid = image_request["id"]
@@ -152,12 +134,12 @@ class StableHorde(breadcord.module.ModuleCog):
         cycle_wait_time = 3
         for _ in range(10 * 60 // cycle_wait_time):
             await asyncio.sleep(cycle_wait_time)
-            data = await self.request_generation_status(uuid)
+            data = await self._request_generation_status(uuid)
 
             if "message" in data or data["faulted"] or not data["is_possible"]:
                 return None
             if data["done"]:
-                data = await self.request_generation_status(uuid, with_images=True)
+                data = await self._request_generation_status(uuid, with_images=True)
                 return (
                     None
                     if "generations" not in data
@@ -165,8 +147,26 @@ class StableHorde(breadcord.module.ModuleCog):
                 )
 
             await interaction.edit_original_response(
-                embed=await self.create_generating_embed(data, input_params, interaction.user)
+                embed=await self._create_generating_embed(data, input_params, interaction.user)
             )
+
+    # noinspection PyUnusedLocal
+    async def model_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str
+    ) -> list[app_commands.Choice[str]]:
+        return [
+            app_commands.Choice(
+                name=f"{model['name']} ({model['count']} available)",
+                value=model['name']
+            )
+            for model in breadcord.helpers.search_for(
+                current,
+                self.available_models,
+                key=lambda model: model["name"]
+            )
+        ]
 
     @app_commands.command(description="Generate an image using AI")
     @app_commands.autocomplete(model=model_autocomplete)  # type: ignore
@@ -209,14 +209,14 @@ class StableHorde(breadcord.module.ModuleCog):
         )
 
         await interaction.response.send_message("Starting generation...")
-        images = await self.generate_images(interaction, generation_input)
+        images = await self._generate_images(interaction, generation_input)
         if images is None:
             await interaction.edit_original_response(
                 embed=discord.Embed(title="Generation failed.", colour=discord.Colour.red())
             )
             return
 
-        embed = await self.create_finished_embed(images[0], generation_input, interaction.user)
+        embed = await self._create_finished_embed(images[0], generation_input, interaction.user)
         files = [
             discord.File(image.img, filename=f"{'SPOILER_' if generation_input.nsfw else ''}generated_image.webp")
             for image in images

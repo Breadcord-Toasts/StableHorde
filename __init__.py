@@ -27,8 +27,11 @@ class DeleteButton(discord.ui.View):
         vote_count = len(self.votes)
         button.label = f"Delete ({vote_count}/{self.required_votes})"
 
-        if interaction.guild is None or vote_count >= min(self.required_votes, interaction.guild.member_count):
-            return await interaction.response.edit_message(attachments=[], view=None)
+        if vote_count >= self.required_votes:
+            for button in self.children:
+                button.disabled = True
+            await interaction.response.edit_message(attachments=[], view=self)
+            return
 
         await interaction.response.edit_message(view=self)
 
@@ -222,12 +225,21 @@ class StableHorde(breadcord.module.ModuleCog):
             for image in images
         ]
 
-        required_reactions = self.settings.required_deletion_votes.value
+        settings_required_reactions = self.settings.required_deletion_votes.value
+        if hasattr(interaction.channel, "members"):
+            required_reactions = min(
+                settings_required_reactions,
+                len([u for u in interaction.channel.members if not u.bot])
+            )
+        else:
+            # If we can't easily get members we set it to 1 just to be safe
+            required_reactions = 1
+
         await interaction.edit_original_response(
             content="",
             embed=embed,
             attachments=files,
-            view=DeleteButton(required_reactions) if required_reactions != -1 else None,
+            view=DeleteButton(required_reactions) if settings_required_reactions != -1 else None,
         )
 
 

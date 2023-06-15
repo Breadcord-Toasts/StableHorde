@@ -1,39 +1,94 @@
 import asyncio
-import re
-from inspect import cleandoc
+import base64
+import inspect
+import io
+import json
+import time
 
 import aiohttp
 import discord
+import pydantic
 from discord import app_commands
 from discord.ext import tasks
-from pydantic.utils import deep_update
 
 import breadcord
-from .helpers.types import *
-from .helpers.utils import *
+from .helpers.types import (
+    GenerationRequest,
+    GenerationParams,
+    APIError,
+    QueuedGeneration,
+    GenerationCheck,
+    GenerationStatus,
+    ActiveModel,
+    ModelType
+)
 
+available_models: list[ActiveModel] = []
 
-class DeleteButton(discord.ui.View):
-    def __init__(self, required_votes: int):
+class DeleteButtonView(discord.ui.View):
+    def __init__(self, *, required_votes: int, author_id: int):
         super().__init__()
         self.required_votes = required_votes
+        self.author_id = author_id
         self.votes = []
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, emoji="\N{WASTEBASKET}")
+    @discord.ui.button(emoji="\N{WASTEBASKET}", label="Delete", style=discord.ButtonStyle.red)
     async def delete(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if (user := interaction.user.id) not in self.votes:
             self.votes.append(user)
+        else:
+            self.votes.remove(user)
 
         vote_count = len(self.votes)
-        button.label = f"Delete ({vote_count}/{self.required_votes})"
+        button.label = f"Delete ({vote_count}/{self.required_votes})" if vote_count else "Delete"
 
-        if vote_count >= self.required_votes:
+        if vote_count >= self.required_votes or interaction.user.id == self.author_id:
             for button in self.children:
                 button.disabled = True
             await interaction.response.edit_message(attachments=[], view=self)
             return
-
         await interaction.response.edit_message(view=self)
+
+
+def is_diffusion_model(model: ActiveModel) -> bool:
+    return model.type == ModelType.IMAGE
+
+
+class DiffusionModelTransformer(app_commands.Transformer):
+    def transform(self, interaction: discord.Interaction, value: str, /) -> ActiveModel | None:
+        value = value.strip()
+        for model in available_models:
+            if model.name.strip() == value:
+                return model
+
+    async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+        def get_choice(model: ActiveModel) -> app_commands.Choice:
+            return app_commands.Choice(
+                name=txt
+                if len(txt := f"{model.name} ({model.count} workers)") <= 100
+                else model.name,
+                value=model.name,
+            )
+
+        if not value:
+            return [
+                get_choice(model)
+                for model in sorted(
+                    filter(is_diffusion_model, available_models),
+                    key=lambda m: m.count,
+                    reverse=True
+                )[:25]
+            ]
+
+        return [
+            get_choice(model)
+            for model in breadcord.helpers.search_for(
+                query=value,
+                objects=list(available_models),
+                key=lambda m: m.name,
+                threshold=60
+            )
+        ]
 
 
 class StableHorde(breadcord.module.ModuleCog):
@@ -41,8 +96,7 @@ class StableHorde(breadcord.module.ModuleCog):
         super().__init__(module_id)
         self.api_base = "/api/v2"
 
-        self.session = None
-        self.available_models: list[dict] = []
+        self.session: aiohttp.ClientSession | None = None
         self.update_models.start()
 
     async def cog_load(self) -> None:
@@ -55,191 +109,200 @@ class StableHorde(breadcord.module.ModuleCog):
 
     @tasks.loop(hours=24)
     async def update_models(self) -> None:
-        async with self.session.get(f"{self.api_base}/status/models", params={"type": "image"}) as response:
-            self.available_models = await response.json()
+        async with self.session.get("/api/v2/status/models", params={"type": "image"}) as response:
+            global available_models
+            available_models = tuple(map(
+                lambda m: ActiveModel(**m),
+                await response.json()
+            ))
 
-    async def _request_image(self, input_params: ImageGenerationInput) -> ImageRequestResponse | RequestFail:
-        payload_base = {
-            "shared": True,
-            "r2": False,
-        }
-        payload = deep_update(payload_base, remove_payload_none_values(dict(input_params)))
-
-        async with self.session.post(
-            f"{self.api_base}/generate/async",
-            headers={"apikey": self.settings.stable_horde_api_key.value},
-            json=payload,
+    async def check_generation(
+        self, queued_generation: QueuedGeneration, *, full_status: bool
+    ) -> GenerationCheck | GenerationStatus:
+        async with self.session.get(
+            f"/api/v2/generate/{'status' if full_status else 'check'}/{queued_generation.id}"
         ) as response:
-            return await response.json()
-
-    async def _request_generation_status(
-        self, generation_id: str, /, *, with_images: bool = False
-    ) -> RequestFail | GenerationCheckResponse | GenerationStatusResponse:
-        api_endpoint = f"{self.api_base}/generate/{'status' if with_images else 'check'}/{generation_id}"
-        async with self.session.get(api_endpoint) as response:
-            return await response.json()
-
-    @staticmethod
-    async def _create_generating_embed(
-        generation_data: GenerationCheckResponse,
-        input_data: ImageGenerationInput,
-        author: discord.User | discord.Member,
-    ) -> discord.Embed:
-        avatar = author.avatar
-
-        embed = discord.Embed(
-            title="Generating image...",
-            description=cleandoc(
-                f"""
-                **Prompt:** {input_data.prompt}
-                **Model:** {input_data.models[0] if input_data.models else 'any'}
-                **Queue Position:** {generation_data["queue_position"]}
-                **Estimated time left:** {generation_data['wait_time']}s
-                """
-            ),
-        )
-        embed.set_footer(text=f"Requested by: {author.name}", icon_url=avatar.url if avatar else None)
-        return embed
-
-    @staticmethod
-    async def _create_finished_embed(
-        image_data: GeneratedImage,
-        input_data: ImageGenerationInput,
-        author: discord.User | discord.Member,
-    ) -> discord.Embed:
-        avatar = author.avatar
-
-        embed = discord.Embed(
-            title="Image generated.",
-            description=cleandoc(
-                f"""
-                **Prompt:** {input_data.prompt}
-                **Seed:** {image_data.seed}
-                **Model:** {image_data.model.replace('_', ' ').replace('-', ' ').title()}
-                **NSFW:** {input_data.nsfw or False}
-                """
-            ),
-        )
-        embed.set_footer(text=f"Requested by: {author.name}", icon_url=avatar.url if avatar else None)
-
-        return embed
-
-    async def _generate_images(
-        self,
-        interaction: discord.Interaction,
-        input_params: ImageGenerationInput,
-    ) -> list[GeneratedImage, ...] | None:
-        image_request = await self._request_image(input_params)
-        if "id" not in image_request:
-            return None
-        uuid = image_request["id"]
-
-        cycle_wait_time = 3
-        for _ in range(10 * 60 // cycle_wait_time):
-            await asyncio.sleep(cycle_wait_time)
-            data = await self._request_generation_status(uuid)
-
-            if "message" in data or data["faulted"] or not data["is_possible"]:
-                return None
-            if data["done"]:
-                data = await self._request_generation_status(uuid, with_images=True)
-                return (
-                    None
-                    if "generations" not in data
-                    else [GeneratedImage(**generated_image) for generated_image in data["generations"]]  # type: ignore
+            response_json = await response.json()
+            if response.status != 200:
+                raise APIError(
+                    f"API returned status code {response.status} "
+                    + (f": {msg}" if (msg := response_json.get("message")) else "")
                 )
+            return GenerationStatus(**response_json) if full_status else GenerationCheck(**response_json)
 
-            await interaction.edit_original_response(
-                embed=await self._create_generating_embed(data, input_params, interaction.user)
-            )
 
-    # noinspection PyUnusedLocal
-    async def model_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str
-    ) -> list[app_commands.Choice[str]]:
-        return [
-            app_commands.Choice(
-                name=f"{model['name']} ({model['count']} available)",
-                value=model['name']
-            )
-            for model in breadcord.helpers.search_for(
-                current,
-                self.available_models,
-                key=lambda model: model["name"]
-            )
-        ]
-
-    @app_commands.command(description="Generate an image using AI")
-    @app_commands.autocomplete(model=model_autocomplete)  # type: ignore
-    @app_commands.describe(
-        prompt="The prompt to feed to the image. anything after ### will be treated as the negative prompt",
-        model="What model to use when generating the image",
-        seed="The random seed the AI should use",
-        cfg_scale="How much the Ai should follow your prompt, higher values means more accurate, but less reactive",
-        should_tile="If the generated image should be tillable, mostly useful for textures",
-        is_nsfw="If you think the image will be NSFW. THis will spoiler the output image",
-        use_gfpgan="GFPGAN helps improve faces, mostly useful if you're going for a realistic look",
-        steps="How many steps should be taken when generating the image",
+    @app_commands.command()
+    @app_commands.rename(
+        nsfw="is_nsfw",
+        n="image_count",
     )
-    async def ai_gen(
+    @app_commands.describe(
+        positive_prompt="A prompt describing what you want in your image",
+        negative_prompt="A prompt describing what you don't want in your image",
+        model="The model to use for generation",
+        nsfw="Whether or not the generation reqeust is NSFW",
+        width="The width of the generated image. Has to be a multiple of 64 and between 64 and 3072",
+        height="The height of the generated image. Has to be a multiple of 64 and between 64 and 3072",
+        steps="The number of steps to run for",
+        seed="The seed to use for generation",
+        n="The number of images to generate",
+    )
+    @app_commands.checks.cooldown(1, 10)
+    async def imagine(
         self,
         interaction: discord.Interaction,
-        prompt: str,
-        model: str = "",
+        positive_prompt: str,
+        negative_prompt: str = "",
+        model: app_commands.Transform[ActiveModel, DiffusionModelTransformer] = None,
+        nsfw: bool = False,
+        width: int = 512,
+        height: int = 512,
+        steps: int = 20,
         seed: str | None = None,
-        cfg_scale: float = 7.5,
-        should_tile: bool | None = None,
-        is_nsfw: bool = False,
-        use_gfpgan: bool | None = None,
-        steps: int | None = None,
+        n: int = 1
+        #TODO: add fields for the source image and mask
+        #TODO: add support for ControlNet
+        #TODO: add field for lora with a transformer
     ):
-        model = re.sub(r" \([0-9]+ available\)$", "", model.strip())
-
-        generation_input = ImageGenerationInput(
-            prompt=prompt,
-            models=[model] if model else None,
-            nsfw=is_nsfw,
-            censor_nsfw=False,
-            params=ImageGenerationInputParams(
-                steps=min(50, steps) if steps is not None else None,
-                seed=seed,
-                cfg_scale=cfg_scale,
-                tiling=should_tile,
-                post_processing=["GFPGAN"] if use_gfpgan else None,
-            ),
-        )
-
-        await interaction.response.send_message("Starting generation...")
-        images = await self._generate_images(interaction, generation_input)
-        if images is None:
-            await interaction.edit_original_response(
-                embed=discord.Embed(title="Generation failed.", colour=discord.Colour.red())
+        positive_prompt, negative_prompt = positive_prompt[:1536], negative_prompt[:1536]
+        try:
+            generation = GenerationRequest(
+                positive_prompt=positive_prompt,
+                negative_prompt=negative_prompt,
+                nsfw=nsfw,
+                models=[model.name] if model else None,
+                params=GenerationParams(
+                    seed=seed,
+                    steps=steps,
+                    width=width,
+                    height=height,
+                    n=n,
+                ),
+                shared=True,
+                r2=False
             )
+        except pydantic.ValidationError:
+            await interaction.response.send_message("Invalid parameters.", ephemeral=True)
             return
 
-        embed = await self._create_finished_embed(images[0], generation_input, interaction.user)
-        files = [
-            discord.File(image.img, filename=f"{'SPOILER_' if generation_input.nsfw else ''}generated_image.webp")
-            for image in images
-        ]
+        generation_json = json.loads(generation.model_dump_json(exclude_none=True, exclude_defaults=True))
+        self.logger.debug(f"Generating image with JSON: {generation_json}")
 
-        settings_required_reactions = self.settings.required_deletion_votes.value
-        if hasattr(interaction.channel, "members"):
-            required_reactions = min(
-                settings_required_reactions,
-                len([u for u in interaction.channel.members if not u.bot])
+        await interaction.response.send_message("Starting to generate image(s)...")
+        async with self.session.post(
+            "/api/v2/generate/async",
+            headers={"apikey": self.settings.stable_horde_api_key.value},
+            json=generation_json | {"dry_run": True}
+        ) as response:
+            response_json = await response.json()
+            if (kudo_cost := response_json.get("kudos")) is None or response.status not in (200, 202):
+                self.logger.warn(f"Image generation failed, got response: {response_json}")
+                await interaction.edit_original_response(content="Failed to generate image(s).")
+                return
+            self.logger.debug(f"Trying to generate an image using {kudo_cost} kudos.")
+            if kudo_cost > float(self.settings.max_kudo_cost.value) and not await self.bot.is_owner(interaction.user):
+                await interaction.edit_original_response(content="Failed to generate, operation too expensive.")
+                self.logger.debug("Aborted image generation due to excessive kudo consumption.")
+                return
+
+        async with self.session.post(
+            "/api/v2/generate/async",
+            headers={"apikey": self.settings.stable_horde_api_key.value},
+            json=generation_json
+        ) as response:
+            if response.status != 202:
+                self.logger.warn(f"Image generation failed, api responded with status code: {response.status}")
+                await interaction.edit_original_response(content="Failed to generate image(s).")
+                return
+            response_json = await response.json()
+            kudo_cost = response_json["kudos"]
+            queued_generation = QueuedGeneration(
+                id=response_json["id"],
+                kudos=response_json["kudos"],
+                message=response_json.get("message"),
             )
-        else:
-            # If we can't easily get members we set it to 1 just to be safe
-            required_reactions = 1
 
+        # A generation request times out after 10 minutes
+        for _ in range((10 * 60) // int(self.settings.time_between_updates.value)):
+            try:
+                check = await self.check_generation(queued_generation, full_status=False)
+            except APIError as err:
+                self.logger.warn(f"Image generation failed, api responded with: {err}")
+                await interaction.edit_original_response(content="Failed to generate image(s).")
+                return
+            self.logger.debug(f"Generation check for {queued_generation.id}: {check}")
+            if check.faulted:
+                self.logger.warn("Image generation failed, generation faulted.")
+                await interaction.edit_original_response(content="Failed to generate image(s).")
+                return
+            if check.done:
+                break
+            await interaction.edit_original_response(
+                content="",
+                embed=discord.Embed(
+                    title="Generation Status",
+                    description=inspect.cleandoc(
+                        f"""
+                        Estimated to be done <t:{round(time.time() + check.wait_time)}:R>
+                        Position in queue: {check.queue_position}
+                        Estimated kudo cost: {kudo_cost}
+                        
+                        **Generation settings**
+                        Prompt: {generation.positive_prompt}
+                        Negative prompt: {generation.negative_prompt}
+                        Marked as NSFW: {generation.nsfw}
+                        """
+                    )
+                )
+            )
+            await asyncio.sleep(int(self.settings.time_between_updates.value))
+
+        generation_status: GenerationStatus = await self.check_generation(queued_generation, full_status=True)
+        if not generation_status.generations:
+            self.logger.warn("Image generation failed, API didn't respond with any images.")
+            await interaction.edit_original_response(content="Failed to generate image(s).")
+            return
+
+        required_deletion_votes = int(self.settings.required_deletion_votes.value)
         await interaction.edit_original_response(
             content="",
-            embed=embed,
-            attachments=files,
-            view=DeleteButton(required_reactions) if settings_required_reactions != -1 else None,
+            embeds=[
+                discord.Embed(
+                    title="Generation Status",
+                    description=inspect.cleandoc(
+                        f"""
+                        Prompt: {generation.positive_prompt}
+                        Negative prompt: {generation.negative_prompt}
+                        Seed: {finished_generation.seed}
+                        Model: {finished_generation.model}
+                        Marked as NSFW: {generation.nsfw}
+                        
+                        **Horde metadata**
+                        Finished by worker: {finished_generation.worker_name} (`{finished_generation.worker_id}`)
+                        Total kudo cost: {generation_status.kudos}
+                        """
+                    ),
+                ).set_image(
+                    url=f"attachment://{'SPOILER_' if generation.nsfw else ''}{finished_generation.id}.webp"
+                ).set_author(
+                    name=interaction.user.display_name,
+                    icon_url=interaction.user.display_avatar.url
+                )
+                for finished_generation in generation_status.generations
+            ],
+            attachments=[
+                discord.File(
+                    fp=io.BytesIO(base64.b64decode(finished_generation.img)),
+                    filename=f"{'SPOILER_' if generation.nsfw else ''}{finished_generation.id}.webp"
+                )
+                for finished_generation in generation_status.generations
+            ],
+            view=DeleteButtonView(
+                required_votes=min(
+                    required_deletion_votes, len(set(filter(lambda m: not m.bot, interaction.channel.members)))
+                ) if hasattr(interaction.channel, "members") else required_deletion_votes,
+                author_id=interaction.user.id
+            )
         )
 
 

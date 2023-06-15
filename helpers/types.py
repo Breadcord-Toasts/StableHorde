@@ -1,30 +1,297 @@
-from typing import TypedDict
+from enum import Enum
 
-from .utils import GeneratedImage
-
-
-class RequestFail(TypedDict):
-    message: str
+from pydantic import BaseModel, constr, Field, conlist, confloat, conint, conset, computed_field
 
 
-class ImageRequestResponse(TypedDict):
-    id: str
-    message: str
+# noinspection SpellCheckingInspection
+class SourceProcessors(Enum):
+    IMG2IMG = "img2img"
+    INPAINTING = "inpainting"
+    OUTPAINTING = "outpainting "
 
 
-class GenerationCheckResponse(TypedDict):
-    finished: int
-    processing: int
-    restarted: int
-    waiting: int
-    done: bool
-    faulted: bool
-    wait_time: int
-    queue_position: int
-    kudos: float
-    is_possible: bool
+# noinspection SpellCheckingInspection
+class SamplerNames(Enum):
+    K_LMS = "k_lms"
+    K_HEUN = "k_heun"
+    K_EULER = "k_euler"
+    K_EULER_A = "k_euler_a"
+    K_DPM_2 = "k_dpm_2"
+    K_DPM_2_A = "k_dpm_2_a"
+    K_DPM_FAST = "k_dpm_fast"
+    K_DPM_ADAPTIVE = "k_dpm_adaptive"
+    K_DPMPP_2S_A = "k_dpmpp_2s_a"
+    K_DPMPP_2M = "k_dpmpp_2m"
+    DPMSOLVER = "dpmsolver"
+    K_DPMPP_SDE = "k_dpmpp_sde"
+    DDIM = "DDIM"
 
 
-class GenerationStatusResponse(GenerationCheckResponse):
-    shared: bool
-    generations: list[GeneratedImage]
+# noinspection SpellCheckingInspection
+class PostProcessors(Enum):
+    GFPGAN = "GFPGAN"
+    REALESRGAN_X4PLUS = "RealESRGAN_x4plus"
+    REALESRGAN_X2PLUS = "RealESRGAN_x2plus"
+    REALESRGAN_X4PLUS_ANIME_6B = "RealESRGAN_x4plus_anime_6B"
+    NMKD_SIAX = "NMKD_Siax"
+    FOURX_ANIMESHARP = "4x_AnimeSharp"
+    CODEFORMERS = "CodeFormers"
+    STRIP_BACKGROUND = "strip_background"
+
+
+# noinspection SpellCheckingInspection
+class ControlType(Enum):
+    CANNY = "canny"
+    HED = "hed"
+    DEPTH = "depth"
+    NORMAL = "normal"
+    OPENPOSE = "openpose"
+    SEG = "seg"
+    SCRIBBLE = "scribble"
+    FAKESCRIBBLES = "fakescribbles"
+    HOUGH = "hough"
+
+
+# noinspection SpellCheckingInspection
+class LoRA(BaseModel):
+    name: constr(min_length=1, max_length=255) = Field(
+        description="The exact name of the LoRa."
+    )
+    model: confloat(ge=0, le=5) = Field(
+        1,
+        description="The strength of the LoRa to apply to the SD model."
+    )
+    clip: confloat(ge=0, le=5) = Field(
+        1,
+        description="The strength of the LoRa to apply to the clip model."
+    )
+    inject_trigger: constr(min_length=1, max_length=30) | None = Field(
+        None,
+        description=(
+            "If set, will try to discover a trigger for this LoRa "
+            "which matches or is similar to this string and inject it into the prompt. "
+            "If 'any' is specified it will be pick the first trigger."
+        )
+    )
+
+
+# noinspection SpellCheckingInspection
+class GenerationParams(BaseModel):
+    class Config:
+        use_enum_values = True
+
+    sampler_name: SamplerNames = SamplerNames.K_EULER_A
+    cfg_scale: confloat(ge=0, le=100, multiple_of=0.5) = 7.5
+    denoising_strength: confloat(ge=0.01, le=1) | None = None
+    seed: str | None = Field(
+        None,
+        description="The seed to use to generate this request. You can pass text as well as numbers."
+    )
+    height: conint(ge=64, le=3072, multiple_of=64) = Field(
+        512,
+        description="The height of the image to generate."
+    )
+    width: conint(ge=64, le=3072, multiple_of=64) = Field(
+        512,
+        description="The width of the image to generate."
+    )
+    seed_variation: conint(ge=1, le=1000) | None = Field(
+        None,
+        description="If passed with multiple n, the provided seed will be incremented every time by this value."
+    )
+    post_processing: conset(PostProcessors) | None = Field(
+        None,
+        description="The list of post-processors to apply to the image, in the order to be applied."
+    )
+    karras: bool = Field(
+        False,
+        description="Set to True to enable karras noise scheduling tweaks."
+    )
+    tiling: bool = Field(
+        False,
+        description="Set to True to create images that stitch together seamlessly."
+    )
+    hires_fix: bool = Field(
+        False,
+        description="Set to True to process the image at base resolution before upscaling and re-processing."
+    )
+    clip_skip: conint(ge=1, le=12) | None = Field(
+        None,
+        description="The number of CLIP language processor layers to skip."
+    )
+    control_type: ControlType | None = None
+    image_is_control: bool = Field(
+        False,
+        description="Set to True if the image submitted is a pre-generated control map for ControlNet use."
+    )
+    return_control_map: bool = Field(
+        False,
+        description="Set to True if you want the ControlNet map returned instead of a generated image."
+    )
+    facefixer_strength: confloat(ge=0, le=1) | None = None
+    loras: list[LoRA] | None = None
+    special: dict | None = None # ¯\_(ツ)_/¯
+    steps: conint(ge=1, le=500) = 30
+    n: conint(ge=1, le=20) = Field(
+        1,
+        description="The amount of images to generate."
+    )
+
+
+# noinspection SpellCheckingInspection
+class GenerationRequest(BaseModel):
+    class Config:
+        use_enum_values = True
+
+    positive_prompt: constr(min_length=1) = Field(
+        description="The positive prompt which will be sent to Stable Diffusion to generate an image.",
+        exclude=True
+    )
+    negative_prompt: str = Field(
+        "",
+        description="The negative prompt which will be sent to Stable Diffusion to generate an image.",
+        exclude=True
+    )
+
+    @computed_field
+    @property
+    def prompt(self) -> str:
+        """The prompt which will be sent to Stable Diffusion to generate an image."""
+        return f"{self.positive_prompt}" + (f"###{self.negative_prompt}" if self.negative_prompt != "" else "")
+
+    params: GenerationParams | None = None
+
+    nsfw: bool = Field(
+        False,
+        description="Set to true if this request is NSFW. This will skip workers which censor images."
+    )
+    trusted_workers: bool = Field(
+        False,
+        description=(
+            "When true, only trusted workers will serve this request. "
+            "When False, Evaluating workers will also be used which can increase speed but adds more risk!"
+        ),
+    )
+    slow_workers: bool = Field(
+        True,
+        description=(
+            "When True, allows slower workers to pick up this request. " "Disabling this incurs an extra kudos cost."
+        ),
+    )
+    censor_nsfw: bool = Field(
+        False,
+        description=(
+            "If the request is SFW, and the worker accidentally generates NSFW, " "it will send back a censored image."
+        ),
+    )
+    workers: conlist(str, min_length=1, max_length=5) | None = Field(
+        None,
+        description="Specify up to 5 workers which are allowed to service this request.",
+    )
+    worker_blacklist: bool = Field(
+        False,
+        description="If true, the worker list will be treated as a blacklist instead of a whitelist."
+    )
+    models: list[str] | None = Field(
+        None,
+        description="Specify which models are allowed to be used for this request."
+    )
+    source_image: str | None = Field(
+        None,
+        # TODO: make  more specific to implementation, taking a Webp object,
+        #  or maybe just don't use a webp object and make the user construct it themselves
+        description="The Base64-encoded webp to use for img2img.",
+    )
+    source_processing: SourceProcessors | None = Field(
+        None,
+        description="If source_image is provided, specifies how to process it."
+    )
+    source_mask: str | None = Field(
+        None,
+        description=(
+            "If source_processing is set to 'inpainting' or 'outpainting', this parameter can be optionally "
+            "provided as the Base64-encoded webp mask of the areas to inpaint. "
+            "If this arg is not passed, the inpainting/outpainting mask has to be embedded as alpha channel."
+        ),
+    )
+    r2: bool = Field(
+        True,
+        description="If True, the image will be sent via cloudflare r2 download link"
+    )
+    shared: bool = Field(
+        False,
+        description=(
+            "If True, The image will be shared with LAION for improving their dataset. "
+            "This will also reduce your kudos consumption by 2. For anonymous users, this is always True."
+        ),
+    )
+    replacement_filter: bool = Field(
+        True,
+        description="If enabled, suspicious prompts are sanitized through a string replacement filter instead True.",
+    )
+    dry_run: bool = Field(
+        False,
+        description="When false, the endpoint will simply return the cost of the request in kudos and exit."
+    )
+
+
+class QueuedGeneration(BaseModel):
+    id: str = Field(description="The UUID of the request. Use this to retrieve the request status in the future.")
+    kudos: int = Field(description="The expected kudos consumption for this request.")
+    message: str | None = Field(None, description="Any extra information from the horde about this request.")
+
+
+# noinspection LongLine
+class GenerationCheck(BaseModel):
+    finished: int = Field(description="The amount of finished jobs in this request.")
+    processing: int = Field(description="The amount of still processing jobs in this request.")
+    restarted: int = Field(description="The amount of jobs that timed out and had to be restarted or were reported as failed by a worker.")
+    waiting: int = Field(description="The amount of jobs waiting to be picked up by a worker.")
+    done: bool = Field(description="True when all jobs in this request are done. Else False.")
+    faulted: bool = Field(False, description="True when this request caused an internal server error and could not be completed.")
+    wait_time: int = Field(description="The expected amount to wait (in seconds) to generate all jobs in this request.")
+    queue_position: int = Field(description="The position in the requests queue. This position is determined by relative Kudos amounts.")
+    kudos: float = Field(description="The amount of total Kudos this request has consumed until now.")
+    is_possible: bool = Field(description="If False, this request will not be able to be completed with the pool of workers currently available.")
+
+
+class GenerationState(Enum):
+    OK = "ok"
+    CENSORED = "censored"
+
+
+class StableGeneration(BaseModel):
+    worker_id: str = Field(description="The UUID of the worker which generated this image.")
+    worker_name: str = Field(description="The name of the worker which generated this image.")
+    model: str = Field(description="The model which generated this image.")
+    state: GenerationState = Field(GenerationState.OK, description="The state of this generation.")
+    img: str = Field(description="The generated image as a Base64-encoded .webp file.")
+    seed: str = Field(description="The seed which generated this image.")
+    id: str = Field(description="The ID for this image.")
+    censored: bool = Field(description="When true this image has been censored by the worker's safety filter.")
+
+
+class GenerationStatus(GenerationCheck):
+    generations: list[StableGeneration]
+    shared: bool = Field(description="If True, These images have been shared with LAION.")
+
+
+class APIError(Exception):
+    pass
+
+
+class ModelType(Enum):
+    TEXT = "text"
+    IMAGE = "image"
+
+class ActiveModel(BaseModel):
+    name: str = Field(description="The Name of a model available by workers in this horde.")
+    count: int = Field(description="How many of workers in this horde are running this model.")
+    performance: float = Field(description="The average speed of generation for this model.")
+    queued: int = Field(description="The amount waiting to be generated by this model.")
+    jobs: float = Field(description="The job count waiting to be generated by this model.")
+    eta: int = Field(description="Estimated time in seconds for this model's queue to be cleared.")
+    type: ModelType = Field(description="The model type (text or image).")
+
+
+

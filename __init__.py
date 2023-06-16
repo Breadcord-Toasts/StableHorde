@@ -98,7 +98,7 @@ class LoRATransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
         def get_choice(lora: LoRA) -> app_commands.Choice:
             return app_commands.Choice(
-                name=lora.name,
+                name=lora.name.strip(),
                 value=lora.name,
             )
 
@@ -225,6 +225,7 @@ class StableHorde(breadcord.module.ModuleCog):
         height="The height of the generated image. Has to be a multiple of 64 and between 64 and 3072",
         steps="The number of steps to run for",
         seed="The seed to use for generation",
+        cfg_scale="How closely the AI should adhere to your prompt (cfg = classifier free guidance)",
         n="The number of images to generate",
         tiling="Weather or not to attempt to make the image tillable",
         hires_fix="Weather or not to process the image at base resolution before upscaling and re-processing",
@@ -248,22 +249,23 @@ class StableHorde(breadcord.module.ModuleCog):
         height: int = 512,
         steps: int = 25,
         seed: str | None = None,
-        n: int = 1,
-        tiling: bool = False,
-        hires_fix: bool = False,
+        cfg_scale: float | None = None,
         post_processing: PostProcessors | None = None, # Technically supports a list of postprocessors, but too bad!
+        lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
         source_image: discord.Attachment | None = None,
         source_processing: SourceProcessors | None = None,
         source_mask: discord.Attachment | None = None,
         control_type: ControlType | None = None,
-        lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
         return_control_map: bool = False,
-        #TODO: add support for ControlNet
-        #TODO: add field for lora with a transformer
+        tiling: bool = False,
+        hires_fix: bool = False,
+        n: int = 1,
         #TODO: add style support using https://github.com/Haidra-Org/AI-Horde-Styles
+        # Why does it need to use the quirkiest format known to man?
+        # style: app_commands.Transform[str | None, StyleTransformer] = None
     ) -> None:
         nsfw = nsfw or lora.nsfw if lora else nsfw
-        # Cut off due to embed limits. There's no real reason to get this high with most normal prompts tho
+        # Cut off due to embed limits. There's no real reason to get this high with most normal prompts anyway
         positive_prompt, negative_prompt = positive_prompt[:1536], negative_prompt[:1536]
         try:
             generation = GenerationRequest(
@@ -278,6 +280,7 @@ class StableHorde(breadcord.module.ModuleCog):
                     SourceProcessors.OUTPAINTING
                 ] else None,
                 params=GenerationParams(
+                    cfg_scale=cfg_scale,
                     seed=seed,
                     steps=steps,
                     width=width,
@@ -398,7 +401,6 @@ class StableHorde(breadcord.module.ModuleCog):
                         **Marked as NSFW:** {generation.nsfw}
                         **Lora:** {lora.name if lora else None}
                         **ControlNet type:** {control_type.value.lower() if control_type else None}
-                        
                         ### **Horde metadata**
                         **Finished by worker:** {finished_generation.worker_name} (`{finished_generation.worker_id}`)
                         **Total kudo cost:** {generation_status.kudos}
@@ -443,6 +445,8 @@ class StableHorde(breadcord.module.ModuleCog):
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message("Command is on cooldown, please wait before trying again.")
             return
+        # Why does this still raise an error??? do cog error handlers not supress handled errors??
+        # AAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 
 

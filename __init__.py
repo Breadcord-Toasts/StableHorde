@@ -3,6 +3,7 @@ import contextlib
 import inspect
 import io
 import json
+import re
 import time
 from base64 import b64encode, b64decode
 
@@ -53,7 +54,7 @@ def is_diffusion_model(model: ActiveModel) -> bool:
 
 class DiffusionModelTransformer(app_commands.Transformer):
     def transform(self, interaction: discord.Interaction, value: str, /) -> ActiveModel | None:
-        value = value.strip()
+        value = re.sub(" \(\d+ workers\)$", "", value.strip())
         for model in available_models:
             if model.name.strip() == value:
                 return model

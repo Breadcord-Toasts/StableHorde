@@ -249,7 +249,7 @@ class StableHorde(breadcord.module.ModuleCog):
         height: int = 512,
         steps: int = 25,
         seed: str | None = None,
-        cfg_scale: float | None = None,
+        cfg_scale: float = 7.5,
         post_processing: PostProcessors | None = None, # Technically supports a list of postprocessors, but too bad!
         lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
         source_image: discord.Attachment | None = None,

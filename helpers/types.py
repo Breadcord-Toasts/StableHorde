@@ -2,6 +2,22 @@ from enum import Enum
 
 from pydantic import BaseModel, constr, Field, conlist, confloat, conint, conset, computed_field
 
+__all__ = [
+    "GenerationRequest",
+    "GenerationParams",
+    "APIError",
+    "QueuedGeneration",
+    "GenerationCheck",
+    "GenerationStatus",
+    "ActiveModel",
+    "ModelType",
+    "SourceProcessors",
+    "LoRA",
+    "PostProcessors",
+    "ControlType",
+    "CivitAIData",
+]
+
 
 # noinspection SpellCheckingInspection
 class SourceProcessors(Enum):
@@ -58,11 +74,11 @@ class LoRA(BaseModel):
         description="The exact name of the LoRa."
     )
     model: confloat(ge=0, le=5) = Field(
-        1,
+        1.0,
         description="The strength of the LoRa to apply to the SD model."
     )
     clip: confloat(ge=0, le=5) = Field(
-        1,
+        1.0,
         description="The strength of the LoRa to apply to the clip model."
     )
     inject_trigger: constr(min_length=1, max_length=30) | None = Field(
@@ -73,6 +89,7 @@ class LoRA(BaseModel):
             "If 'any' is specified it will be pick the first trigger."
         )
     )
+    nsfw: bool = Field(False, exclude=True)
 
 
 # noinspection SpellCheckingInspection
@@ -196,10 +213,8 @@ class GenerationRequest(BaseModel):
         None,
         description="Specify which models are allowed to be used for this request."
     )
-    source_image: str | None = Field(
+    source_image: str | bytes | None = Field(
         None,
-        # TODO: make  more specific to implementation, taking a Webp object,
-        #  or maybe just don't use a webp object and make the user construct it themselves
         description="The Base64-encoded webp to use for img2img.",
     )
     source_processing: SourceProcessors | None = Field(
@@ -293,5 +308,9 @@ class ActiveModel(BaseModel):
     eta: int = Field(description="Estimated time in seconds for this model's queue to be cleared.")
     type: ModelType = Field(description="The model type (text or image).")
 
+
+class CivitAIData(BaseModel):
+    models: list[LoRA]
+    last_indexed_at: int
 
 

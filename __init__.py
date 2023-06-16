@@ -262,6 +262,9 @@ class StableHorde(breadcord.module.ModuleCog):
         n: int = 1,
         #TODO: add style support using https://github.com/Haidra-Org/AI-Horde-Styles
         # Why does it need to use the quirkiest format known to man?
+        # Do i seriously need to write a function that converts a style to a GenerationRequest object?
+        # Why is the format of the prompt field of the `raw` and `raw2` styles different from all others?
+        # How does the official implementations manage to parse this mess? Oh wait, I know! Spaghetti!
         # style: app_commands.Transform[str | None, StyleTransformer] = None
     ) -> None:
         nsfw = nsfw or lora.nsfw if lora else nsfw
@@ -401,13 +404,12 @@ class StableHorde(breadcord.module.ModuleCog):
                         **Marked as NSFW:** {generation.nsfw}
                         **Lora:** {lora.name if lora else None}
                         **ControlNet type:** {control_type.value.lower() if control_type else None}
+                        
                         ### **Horde metadata**
                         **Finished by worker:** {finished_generation.worker_name} (`{finished_generation.worker_id}`)
                         **Total kudo cost:** {generation_status.kudos}
                         """
                     ),
-                ).set_image(
-                    url=f"attachment://{'SPOILER_' if generation.nsfw else ''}{finished_generation.id}.webp"
                 ).set_author(
                     name=interaction.user.display_name,
                     icon_url=interaction.user.display_avatar.url
@@ -443,7 +445,9 @@ class StableHorde(breadcord.module.ModuleCog):
         error: app_commands.AppCommandError
     ) -> None:
         if isinstance(error, app_commands.CommandOnCooldown):
-            await interaction.response.send_message("Command is on cooldown, please wait before trying again.")
+            await interaction.response.send_message(
+                "Command is on cooldown, please wait before trying again.", ephemeral=True
+            )
             return
         # Why does this still raise an error??? do cog error handlers not supress handled errors??
         # AAAAAAAAAAAAAAAAAAAAAAAAAAAA

@@ -50,3 +50,6 @@ class FaultedGenerationError(AppCommandError):
 
 class MissingGenerationsError(AppCommandError):
     ...
+
+class GenerationTimeoutError(AppCommandError):
+    ...

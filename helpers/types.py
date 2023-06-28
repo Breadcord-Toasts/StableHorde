@@ -17,6 +17,10 @@ __all__ = [
     "PostProcessors",
     "ControlType",
     "CivitAIData",
+    "InterrogationRequest",
+    "InterrogationForm",
+    "InterrogationType",
+    "InterrogationStatuses"
 ]
 
 from .constants import HORDE_API_BASE
@@ -151,7 +155,18 @@ class GenerationParams(BaseModel):
     )
     facefixer_strength: confloat(ge=0, le=1) | None = None
     loras: list[LoRA] | None = None
+
+    #TODO: does this actually do anything? If so, i'll need to implement somehting better than this for it
+    # Example value as provided by the docs:
+    #     "special": {
+    #       "*": {
+    #         "additionalProp1": {},
+    #         "additionalProp2": {},
+    #         "additionalProp3": {}
+    #       }
+    #     },
     special: dict | None = None # ¯\_(ツ)_/¯
+
     steps: conint(ge=1, le=500) = 30
     n: conint(ge=1, le=20) = Field(
         1,
@@ -220,10 +235,7 @@ class QueuedGeneration(BaseModel, extra=Extra.allow):
         return await self._fetch_status(full=True)
 
 
-
-
-
-# noinspection SpellCheckingInspection
+# noinspection SpellCheckingInspection, LongLine
 class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
     def __init__(self, *, session: aiohttp.ClientSession, **kwargs):
         super().__init__(**kwargs)
@@ -260,15 +272,11 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
     )
     slow_workers: bool = Field(
         True,
-        description=(
-            "When True, allows slower workers to pick up this request. " "Disabling this incurs an extra kudos cost."
-        ),
+        description="When True, allows slower workers to pick up this request. Disabling this incurs an extra kudos cost.",
     )
     censor_nsfw: bool = Field(
         False,
-        description=(
-            "If the request is SFW, and the worker accidentally generates NSFW, " "it will send back a censored image."
-        ),
+        description="If the request is SFW, and the worker accidentally generates NSFW, it will send back a censored image.",
     )
     workers: conlist(str, min_length=1, max_length=5) | None = Field(
         None,
@@ -318,13 +326,13 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
         description="When false, the endpoint will simply return the cost of the request in kudos and exit."
     )
 
-    async def _make_request(self, dry_run: bool = False) -> QueuedGeneration | int:
-        generation_json = json.loads(self.model_dump_json(exclude_none=True, exclude_defaults=True))
-        generation_json |= {"dry_run": dry_run}
+    def dump_json_dict(self) -> dict:
+        return json.loads(self.model_dump_json(exclude_none=True, exclude_defaults=True))
 
+    async def _make_request(self, dry_run: bool = False) -> QueuedGeneration | int:
         async with self.session.post(
             f"{HORDE_API_BASE}/generate/async",
-            json=generation_json
+            json=self.dump_json_dict() | {"dry_run": dry_run}
         ) as response:
             response_json: dict = await response.json()
 
@@ -339,7 +347,6 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
                         session=self.session
                     )
                 case _:
-                    print(response_json)
                     raise RequestError(response_json.get("message", "Unknown error."), status_code=response.status)
 
     async def fetch_kudo_cost(self) -> int:
@@ -347,7 +354,6 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
 
     async def request_generation(self) -> QueuedGeneration:
         return await self._make_request()
-
 
 
 class ModelType(Enum):
@@ -367,5 +373,102 @@ class ActiveModel(BaseModel):
 class CivitAIData(BaseModel):
     models: list[LoRA]
     last_indexed_at: int
+
+
+class InterrogationStatuses(Enum):
+    WAITING = "waiting"
+    PROCESSING = "processing"
+    DONE = "done"
+
+
+class InterrogationFormStatus(BaseModel): # I swear these names are only getting less logical
+    form: str | None = Field(None, description="The type of interrogation this is.")
+    state: str | None = Field(None, description="The overall status of this interrogation.")
+
+    #TODO: Figure out what this is
+    # It's somewhat similar to GenerationParams.special, but I don't know what that does either
+    result: dict | None = None # ?????????
+
+
+class InterrogationStatus(BaseModel):
+    state: InterrogationStatuses = Field(description="The overall status of this interrogation.")
+    forms: list[InterrogationFormStatus]
+
+
+class QueuedInterrogation(BaseModel, extra=Extra.allow):
+    def __init__(self, *, session: aiohttp.ClientSession, **kwargs):
+        super().__init__(**kwargs)
+        self.session = session
+
+    id: str = Field(description="The UUID of the request. Use this to retrieve the request status in the future.")
+    message: str | None = Field(None, description="Any extra information from the horde about this request.")
+
+    async def fetch_status(self) -> InterrogationStatus:
+        # FYI: despite what the docs want you to believe, there is no check endpoint!
+        api_endpoint = f"{HORDE_API_BASE}/interrogate/status/{self.id}"
+        async with self.session.get(api_endpoint) as response:
+            response_json = await response.json()
+            if response.status != 200:
+                raise RequestError(response_json["message"], status_code=response.status)
+            return InterrogationStatus(**response_json)
+
+
+# noinspection SpellCheckingInspection
+class InterrogationType(Enum):
+    CAPTION = "caption"
+    INTERROGATION = "interrogation"
+    NSFW = "nsfw"
+    GFPGAN = "GFPGAN"
+    REALESRGAN_X4PLUS = "RealESRGAN_x4plus"
+    REALESRGAN_X2PLUS = "RealESRGAN_x2plus"
+    REALESRGAN_X4PLUS_ANIME_6B = "RealESRGAN_x4plus_anime_6B"
+    NMKD_SIAX = "NMKD_Siax"
+    FOURX_ANIMESHARP = "4x_AnimeSharp"
+    CODEFORMERS = "CodeFormers"
+    STRIP_BACKGROUND = "strip_background"
+
+
+class InterrogationForm(BaseModel, use_enum_values=True):
+    name: InterrogationType = Field(description="The type of interrogation this is.")
+
+    #TODO: Figure out what this is
+    # It's somewhat similar to GenerationParams.special, but I don't know what that does either
+    payload: dict | None = None  # ?????????
+
+
+# Corresponds to "ModelInterrogationInputStable" in the official docs but
+# was renamed for consistency with "GenerationRequest"
+# noinspection LongLine
+class InterrogationRequest(BaseModel, extra=Extra.allow):
+    def __init__(self, *, session: aiohttp.ClientSession, **kwargs):
+        super().__init__(**kwargs)
+        self.session = session
+
+    forms: list[InterrogationForm]
+    source_image: str = Field(description="The public URL of the image to interrogate.")
+    slow_workers: bool = Field(
+        True,
+        description="When True, allows slower workers to pick up this request. Disabling this incurs an extra kudos cost.",
+    )
+
+    def dump_json_dict(self) -> dict:
+        return json.loads(self.model_dump_json(exclude_none=True, exclude_defaults=True))
+
+    async def request_interrogation(self):
+        async with self.session.post(
+            f"{HORDE_API_BASE}/interrogate/async",
+            json=self.dump_json_dict()
+        ) as response:
+            response_json: dict = await response.json()
+
+            match tuple(response_json.keys()):
+                case ("id",) | ("id", "message"):
+                    return QueuedInterrogation(
+                        id=response_json["id"],
+                        message=response_json.get("message"),
+                        session=self.session
+                    )
+                case _:
+                    raise RequestError(response_json.get("message", "Unknown error."), status_code=response.status)
 
 

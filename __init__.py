@@ -17,12 +17,11 @@ from discord.ext import tasks, commands
 import breadcord
 from .helpers.constants import HORDE_API_BASE
 from .helpers.errors import (
-    RequestError,
     HordeAPIError,
     MaintenanceModeError,
     InsufficientKudosError,
     FaultedGenerationError,
-    MissingGenerationsError
+    MissingGenerationsError, GenerationTimeoutError
 )
 from .helpers.types import *
 
@@ -133,6 +132,12 @@ class StableHorde(breadcord.module.ModuleCog):
         self.session: aiohttp.ClientSession | None = None
         self.update_data.start()
 
+        self.ctx_menu = app_commands.ContextMenu(
+            name='Remix Avatar',
+            callback=self.remix_user_avatar,
+        )
+        self.bot.tree.add_command(self.ctx_menu)
+
     async def cog_load(self) -> None:
         api_key: str = self.settings.stable_horde_api_key.value
         self.session = aiohttp.ClientSession(headers={"apikey": api_key})
@@ -141,6 +146,7 @@ class StableHorde(breadcord.module.ModuleCog):
         self.update_data.cancel()
         if self.session is not None:
             await self.session.close()
+        self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
 
     @tasks.loop(hours=24)
     async def update_data(self, *, force_update: bool = False) -> None:
@@ -212,12 +218,15 @@ class StableHorde(breadcord.module.ModuleCog):
         interaction: discord.Interaction,
         generation: GenerationRequest,
         *,
-        source_image: discord.Attachment | None = None,
+        source_image: discord.Attachment | discord.Asset | None = None,
     ) -> None:
         lora = generation.params.loras[0] if generation.params.loras else None
         control_type = generation.params.control_type
 
-        await interaction.response.send_message("Starting to generate image...")
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content="Starting to generate image...")
+        else:
+            await interaction.response.send_message("Starting to generate image...")
 
         kudo_cost = await generation.fetch_kudo_cost()
         if kudo_cost > float(self.settings.max_kudo_cost.value) and not await self.bot.is_owner(interaction.user):
@@ -237,14 +246,14 @@ class StableHorde(breadcord.module.ModuleCog):
                     title="Generation status",
                     description=inspect.cleandoc(
                         f"""
-                        Estimated to be done <t:{round(time.time() + check.wait_time)}:R>
-                        Position in queue: {check.queue_position}
-                        Estimated kudo cost: {kudo_cost}
+                        **Estimated to be done <t:{round(time.time() + check.wait_time)}:R>**
+                        **Position in queue:** {check.queue_position}
+                        **Estimated kudo cost:** {kudo_cost}
 
-                        **Generation settings**
-                        Prompt: {generation.positive_prompt}
-                        Negative prompt: {generation.negative_prompt or None}
-                        Marked as NSFW: {generation.nsfw}
+                        ## Generation settings
+                        **Prompt:** {generation.positive_prompt}
+                        **Negative prompt:** {generation.negative_prompt or None}
+                        **Marked as NSFW:** {generation.nsfw}
                         """
                     )
                 ).set_thumbnail(
@@ -252,6 +261,8 @@ class StableHorde(breadcord.module.ModuleCog):
                 )
             )
             await asyncio.sleep(int(self.settings.time_between_updates.value))
+        else:
+            raise GenerationTimeoutError()
 
         generation_status = await queued_generation.status()
         if not generation_status.generations:
@@ -301,6 +312,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 author_id=interaction.user.id
             )
         )
+
 
     @app_commands.command(description="Generates an image using Stable Diffusion",)
     @app_commands.rename(
@@ -391,6 +403,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 ),
                 shared=True,
                 r2=False,
+                replacement_filter=True,
 
                 session=self.session
             )
@@ -433,6 +446,11 @@ class StableHorde(breadcord.module.ModuleCog):
             self.logger.warn("Image generation failed, generation faulted.")
             return
 
+        if isinstance(error, GenerationTimeoutError):
+            await send_error_message(content="Failed to generate, generation timed out.")
+            self.logger.debug("Aborted image generation due to timeout.")
+            return
+
         if isinstance(error, MissingGenerationsError):
             await send_error_message(**generic_error_args)
             self.logger.warn("Image generation failed. API didn't respond with any images.")
@@ -447,13 +465,51 @@ class StableHorde(breadcord.module.ModuleCog):
             await send_error_message(**generic_error_args)
             self.logger.warn(
                 f"Image generation failed. {error.__class__.__name__}"
-                + (f": {error}" if str(error) else "")
+                + (f": {error}" if str(error) else "") + f" {error.status_code}"
             )
             return
 
-    #TODO: Context menu entry (@app_commands.context_menu()) to "remix" a user's PFP using controlnet
-    # first I'd want to break up the above monster method into individual parts
-    # none of which should require an interaction to function
+    async def remix_user_avatar(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        await interaction.response.send_message(f"Remixing {user.mention}'s avatar...")
+
+        avatar = user.display_avatar.with_format("webp")
+        interrogation = InterrogationRequest(
+            forms=[InterrogationForm(name=InterrogationType.CAPTION)],
+            source_image=avatar.url,
+            session=self.session
+        )
+        queued_interrogation = await interrogation.request_interrogation()
+
+        # An interrogation request times out after 20 minutes
+        for _ in range((20 * 60) // int(self.settings.time_between_updates.value)):
+            status = await queued_interrogation.fetch_status()
+            if status.state == InterrogationStatuses.DONE:
+                break
+            await asyncio.sleep(int(self.settings.time_between_updates.value))
+        else:
+            #TODO: Rename error so it fits better with interrogations AND image generations
+            raise GenerationTimeoutError()
+        prompt = next(iter(status.forms[0].result.values()))
+
+        generation = GenerationRequest(
+            positive_prompt=prompt,
+            # models=[model.name] if model else None,
+            source_image=b64encode(await avatar.read()),
+            params=GenerationParams(
+                steps=20,
+                width=512,
+                height=512,
+                control_type=ControlType.CANNY,
+            ),
+            shared=True,
+            r2=False,
+            replacement_filter=True,
+
+            session=self.session
+        )
+        await self._generate_and_send(interaction, generation, source_image=avatar)
+
+
 
 
 async def setup(bot: breadcord.Bot):

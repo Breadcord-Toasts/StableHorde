@@ -3,6 +3,7 @@ import contextlib
 import inspect
 import io
 import json
+import random
 import re
 import time
 from base64 import b64encode, b64decode
@@ -491,6 +492,10 @@ class StableHorde(breadcord.module.ModuleCog):
             raise GenerationTimeoutError()
         prompt = next(iter(status.forms[0].result.values()))
 
+        controlnet_model: str = self.settings.avatar_remix_controlnet_model.value.lower()
+        if controlnet_model.lower() == "random":
+            controlnet_model = random.choice(list(ControlType))
+
         generation = GenerationRequest(
             positive_prompt=prompt,
             # models=[model.name] if model else None,
@@ -499,7 +504,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 steps=20,
                 width=512,
                 height=512,
-                control_type=ControlType.CANNY,
+                control_type=controlnet_model,
             ),
             shared=True,
             r2=False,

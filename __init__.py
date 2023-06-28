@@ -16,7 +16,14 @@ from discord.ext import tasks, commands
 
 import breadcord
 from .helpers.constants import HORDE_API_BASE
-from .helpers.errors import RequestError, GenericHordeError, MaintenanceMode
+from .helpers.errors import (
+    RequestError,
+    HordeAPIError,
+    MaintenanceModeError,
+    InsufficientKudosError,
+    FaultedGenerationError,
+    MissingGenerationsError
+)
 from .helpers.types import *
 
 available_models: list[ActiveModel] = []
@@ -200,6 +207,100 @@ class StableHorde(breadcord.module.ModuleCog):
                 await file.write(civitai_data.model_dump_json())
                 self.logger.debug(f"Saved civitai model cache with {len(civitai_data.models)} models")
 
+    async def _generate_and_send(
+        self,
+        interaction: discord.Interaction,
+        generation: GenerationRequest,
+        *,
+        source_image: discord.Attachment | None = None,
+    ) -> None:
+        lora = generation.params.loras[0] if generation.params.loras else None
+        control_type = generation.params.control_type
+
+        await interaction.response.send_message("Starting to generate image...")
+
+        kudo_cost = await generation.fetch_kudo_cost()
+        if kudo_cost > float(self.settings.max_kudo_cost.value) and not await self.bot.is_owner(interaction.user):
+            raise InsufficientKudosError()
+        queued_generation = await generation.request_generation()
+
+        # A generation request times out after 10 minutes
+        for _ in range((10 * 60) // int(self.settings.time_between_updates.value)):
+            check = await queued_generation.check()
+            if check.faulted:
+                raise FaultedGenerationError()
+            if check.done:
+                break
+            await interaction.edit_original_response(
+                content="",
+                embed=discord.Embed(
+                    title="Generation status",
+                    description=inspect.cleandoc(
+                        f"""
+                        Estimated to be done <t:{round(time.time() + check.wait_time)}:R>
+                        Position in queue: {check.queue_position}
+                        Estimated kudo cost: {kudo_cost}
+
+                        **Generation settings**
+                        Prompt: {generation.positive_prompt}
+                        Negative prompt: {generation.negative_prompt or None}
+                        Marked as NSFW: {generation.nsfw}
+                        """
+                    )
+                ).set_thumbnail(
+                    url=source_image.url if source_image else None
+                )
+            )
+            await asyncio.sleep(int(self.settings.time_between_updates.value))
+
+        generation_status = await queued_generation.status()
+        if not generation_status.generations:
+            raise MissingGenerationsError()
+
+        required_deletion_votes = int(self.settings.required_deletion_votes.value)
+        await interaction.edit_original_response(
+            content="",
+            embeds=[
+                discord.Embed(
+                    title="Generation complete",
+                    description=inspect.cleandoc(
+                        f"""
+                        **Prompt:** {generation.positive_prompt}
+                        **Negative prompt:** {generation.negative_prompt or None}
+                        **Seed:** {finished_generation.seed}
+                        **Model:** {finished_generation.model}
+                        **Marked as NSFW:** {generation.nsfw}
+                        **Lora:** {lora.name if lora else None}
+                        **ControlNet type:** {control_type.value.lower() if control_type else None}
+
+                        ### **Horde metadata**
+                        **Finished by worker:** {finished_generation.worker_name} (`{finished_generation.worker_id}`)
+                        **Total kudo cost:** {generation_status.kudos}
+                        """
+                    ),
+                ).set_author(
+                    name=interaction.user.display_name,
+                    icon_url=interaction.user.display_avatar.url
+                ).set_thumbnail(
+                    url=source_image.url if source_image else None
+                )
+                for finished_generation in generation_status.generations
+            ],
+            attachments=[
+                discord.File(
+                    fp=io.BytesIO(b64decode(finished_generation.img)),
+                    filename=f"{'SPOILER_' if generation.nsfw else ''}{finished_generation.id}.webp"
+                )
+                for finished_generation in generation_status.generations
+            ],
+            view=DeleteButtonView(
+                required_votes=min(
+                    required_deletion_votes,
+                    len(set(filter(lambda m: not m.bot, interaction.channel.members)))
+                ) if hasattr(interaction.channel, "members") else required_deletion_votes,
+                author_id=interaction.user.id
+            )
+        )
 
     @app_commands.command(description="Generates an image using Stable Diffusion",)
     @app_commands.rename(
@@ -293,113 +394,12 @@ class StableHorde(breadcord.module.ModuleCog):
 
                 session=self.session
             )
-        except pydantic.ValidationError as err:
+        # This is the only validation error we want to ignore, since it happening depends on the user's reading skills
+        except pydantic.ValidationError:
             await interaction.response.send_message("Invalid parameter(s).", ephemeral=True)
-            self.logger.debug(f"Invalid parameters were passed. {err}")
             return
 
-        await interaction.response.send_message("Generating image...")
-
-        try:
-            kudo_cost = await generation.fetch_kudo_cost()
-            if kudo_cost > float(self.settings.max_kudo_cost.value) and not await self.bot.is_owner(interaction.user):
-                await interaction.edit_original_response(content="Failed to generate, operation too expensive.")
-                self.logger.debug("Aborted image generation due to excessive kudo consumption.")
-                return
-            queued_generation = await generation.queue_generation()
-        except GenericHordeError as err:
-            await interaction.edit_original_response(
-                content=f"Failed to generate image. Error: {err.__class__.__name__}"
-            )
-            self.logger.debug(f"Image generation failed. {err}")
-            return
-
-        # A generation request times out after 10 minutes
-        for _ in range((10 * 60) // int(self.settings.time_between_updates.value)):
-            try:
-                check = await queued_generation.check()
-            except GenericHordeError as err:
-                if not isinstance(err, MaintenanceMode):
-                    self.logger.warn(f"Image generation failed. {err}")
-                await interaction.edit_original_response(content="Failed to generate image(s).")
-                return
-            if check.faulted:
-                self.logger.warn("Image generation failed, generation faulted.")
-                await interaction.edit_original_response(content="Failed to generate image(s).")
-                return
-            if check.done:
-                break
-            await interaction.edit_original_response(
-                content="",
-                embed=discord.Embed(
-                    title="Generation status",
-                    description=inspect.cleandoc(
-                        f"""
-                        Estimated to be done <t:{round(time.time() + check.wait_time)}:R>
-                        Position in queue: {check.queue_position}
-                        Estimated kudo cost: {kudo_cost}
-                        
-                        **Generation settings**
-                        Prompt: {generation.positive_prompt}
-                        Negative prompt: {generation.negative_prompt or None}
-                        Marked as NSFW: {generation.nsfw}
-                        """
-                    )
-                ).set_thumbnail(
-                    url=source_image.url if source_image else None
-                )
-            )
-            await asyncio.sleep(int(self.settings.time_between_updates.value))
-
-        generation_status = await queued_generation.status()
-        if not generation_status.generations:
-            self.logger.warn("Image generation failed, API didn't respond with any images.")
-            await interaction.edit_original_response(content="Failed to generate image(s).")
-            return
-
-        required_deletion_votes = int(self.settings.required_deletion_votes.value)
-        await interaction.edit_original_response(
-            content="",
-            embeds=[
-                discord.Embed(
-                    title="Generation complete",
-                    description=inspect.cleandoc(
-                        f"""
-                        **Prompt:** {generation.positive_prompt}
-                        **Negative prompt:** {generation.negative_prompt or None}
-                        **Seed:** {finished_generation.seed}
-                        **Model:** {finished_generation.model}
-                        **Marked as NSFW:** {generation.nsfw}
-                        **Lora:** {lora.name if lora else None}
-                        **ControlNet type:** {control_type.value.lower() if control_type else None}
-                        
-                        ### **Horde metadata**
-                        **Finished by worker:** {finished_generation.worker_name} (`{finished_generation.worker_id}`)
-                        **Total kudo cost:** {generation_status.kudos}
-                        """
-                    ),
-                ).set_author(
-                    name=interaction.user.display_name,
-                    icon_url=interaction.user.display_avatar.url
-                ).set_thumbnail(
-                    url=source_image.url if source_image else None
-                )
-                for finished_generation in generation_status.generations
-            ],
-            attachments=[
-                discord.File(
-                    fp=io.BytesIO(b64decode(finished_generation.img)),
-                    filename=f"{'SPOILER_' if generation.nsfw else ''}{finished_generation.id}.webp"
-                )
-                for finished_generation in generation_status.generations
-            ],
-            view=DeleteButtonView(
-                required_votes=min(
-                    required_deletion_votes, len(set(filter(lambda m: not m.bot, interaction.channel.members)))
-                ) if hasattr(interaction.channel, "members") else required_deletion_votes,
-                author_id=interaction.user.id
-            )
-        )
+        await self._generate_and_send(interaction, generation, source_image=source_image)
 
     @commands.command(name="update_data")
     @commands.is_owner()
@@ -412,15 +412,44 @@ class StableHorde(breadcord.module.ModuleCog):
         interaction: discord.Interaction,
         error: app_commands.AppCommandError
     ) -> None:
+        async def send_error_message(*args, **kwargs) -> None:
+            if interaction.response.is_done():
+                await interaction.edit_original_response(*args, **kwargs)
+            else:
+                await interaction.response.send_message(*args, **kwargs)
+        generic_error_args = dict(content="Failed to generate image(s).")
+
         if isinstance(error, app_commands.CommandOnCooldown):
-            await interaction.response.send_message(
-                "Command is on cooldown, please wait before trying again.", ephemeral=True
+            await send_error_message("Command is on cooldown, please wait before trying again.", ephemeral=True)
+            return
+
+        if isinstance(error, InsufficientKudosError):
+            await send_error_message(content="Failed to generate, operation was too expensive.")
+            self.logger.debug("Aborted image generation due to excessive kudo cost.")
+            return
+
+        if isinstance(error, FaultedGenerationError):
+            await send_error_message(**generic_error_args)
+            self.logger.warn("Image generation failed, generation faulted.")
+            return
+
+        if isinstance(error, MissingGenerationsError):
+            await send_error_message(**generic_error_args)
+            self.logger.warn("Image generation failed. API didn't respond with any images.")
+            return
+
+        if isinstance(error, MaintenanceModeError):
+            await send_error_message(content="Failed to generate, the API is in maintenance mode.")
+            self.logger.debug("Aborted image generation due to maintenance mode.")
+            return
+
+        if isinstance(error, HordeAPIError):
+            await send_error_message(**generic_error_args)
+            self.logger.warn(
+                f"Image generation failed. {error.__class__.__name__}"
+                + (f": {error}" if str(error) else "")
             )
             return
-        # Why does this still raise an error??? do cog error handlers not supress handled errors??
-        # AAAAAAAAAAAAAAAAAAAAAAAAAAAA
-
-
 
     #TODO: Context menu entry (@app_commands.context_menu()) to "remix" a user's PFP using controlnet
     # first I'd want to break up the above monster method into individual parts

@@ -345,7 +345,7 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
     async def fetch_kudo_cost(self) -> int:
         return await self._make_request(dry_run=True)
 
-    async def queue_generation(self) -> QueuedGeneration:
+    async def request_generation(self) -> QueuedGeneration:
         return await self._make_request()
 
 

@@ -470,9 +470,9 @@ class StableHorde(breadcord.module.ModuleCog):
             return
 
     async def remix_user_avatar(self, interaction: discord.Interaction, user: discord.Member) -> None:
-        await interaction.response.send_message(f"Remixing {user.mention}'s avatar...")
+        await interaction.response.send_message(f"Remixing {user.display_name}'s avatar...")
 
-        avatar = user.display_avatar.with_format("webp")
+        avatar = user.display_avatar.with_format("webp").with_size(512)
         interrogation = InterrogationRequest(
             forms=[InterrogationForm(name=InterrogationType.CAPTION)],
             source_image=avatar.url,
@@ -508,8 +508,6 @@ class StableHorde(breadcord.module.ModuleCog):
             session=self.session
         )
         await self._generate_and_send(interaction, generation, source_image=avatar)
-
-
 
 
 async def setup(bot: breadcord.Bot):

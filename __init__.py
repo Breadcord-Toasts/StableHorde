@@ -250,7 +250,7 @@ class StableHorde(breadcord.module.ModuleCog):
                         **Position in queue:** {check.queue_position}
                         **Estimated kudo cost:** {kudo_cost}
 
-                        ## Generation settings
+                        ### Generation settings
                         **Prompt:** {generation.positive_prompt}
                         **Negative prompt:** {generation.negative_prompt or None}
                         **Marked as NSFW:** {generation.nsfw}

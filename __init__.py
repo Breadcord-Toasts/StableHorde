@@ -15,12 +15,14 @@ from discord import app_commands
 from discord.ext import tasks, commands
 
 import breadcord
+from .helpers.constants import HORDE_API_BASE
+from .helpers.errors import RequestError, GenericHordeError, MaintenanceMode
 from .helpers.types import *
 
 available_models: list[ActiveModel] = []
-civitai_data: CivitAIData = CivitAIData(models=[], last_indexed_at=0)
-available_styles: dict[str, dict] = {} #TODO: use this
-available_style_categories: dict[str, list] = {} #TODO: use this
+# civitai_data: CivitAIData = CivitAIData(models=[], last_indexed_at=0)
+# available_styles: dict[str, dict] = {} #TODO: use this
+# available_style_categories: dict[str, list] = {} #TODO: use this
 
 
 class DeleteButtonView(discord.ui.View):
@@ -120,13 +122,13 @@ class LoRATransformer(app_commands.Transformer):
 class StableHorde(breadcord.module.ModuleCog):
     def __init__(self, module_id: str):
         super().__init__(module_id)
-        self.api_base = "https://stablehorde.net/api/v2"
 
         self.session: aiohttp.ClientSession | None = None
         self.update_data.start()
 
     async def cog_load(self) -> None:
-        self.session = aiohttp.ClientSession()
+        api_key: str = self.settings.stable_horde_api_key.value
+        self.session = aiohttp.ClientSession(headers={"apikey": api_key})
 
     async def cog_unload(self):
         self.update_data.cancel()
@@ -135,13 +137,17 @@ class StableHorde(breadcord.module.ModuleCog):
 
     @tasks.loop(hours=24)
     async def update_data(self, *, force_update: bool = False) -> None:
-        async with self.session.get(f"{self.api_base}/status/models", params={"type": "image"}) as response:
+        async with self.session.get(f"{HORDE_API_BASE}/status/models", params={"type": "image"}) as response:
             global available_models
             available_models = list(map(
                 lambda m: ActiveModel(**m),
                 await response.json()
             ))
             self.logger.debug("Fetched horde models")
+
+        return
+        # TODO: make this nonsense less awful
+        # noinspection PyUnreachableCode
 
         async with self.session.get(
             "https://raw.githubusercontent.com/Haidra-Org/AI-Horde-Styles/main/styles.json"
@@ -193,21 +199,6 @@ class StableHorde(breadcord.module.ModuleCog):
                 self.logger.debug("Saving civitai model cache")
                 await file.write(civitai_data.model_dump_json())
                 self.logger.debug(f"Saved civitai model cache with {len(civitai_data.models)} models")
-
-
-    async def check_generation(
-        self, queued_generation: QueuedGeneration, *, full_status: bool
-    ) -> GenerationCheck | GenerationStatus:
-        async with self.session.get(
-            f"{self.api_base}/generate/{'status' if full_status else 'check'}/{queued_generation.id}"
-        ) as response:
-            response_json = await response.json()
-            if response.status != 200:
-                raise APIError(
-                    f"API returned status code {response.status} "
-                    + (f": {msg}" if (msg := response_json.get("message")) else "")
-                )
-            return GenerationStatus(**response_json) if full_status else GenerationCheck(**response_json)
 
 
     @app_commands.command(description="Generates an image using Stable Diffusion",)
@@ -298,64 +289,40 @@ class StableHorde(breadcord.module.ModuleCog):
                     return_control_map=return_control_map
                 ),
                 shared=True,
-                r2=False
+                r2=False,
+
+                session=self.session
             )
         except pydantic.ValidationError as err:
             await interaction.response.send_message("Invalid parameter(s).", ephemeral=True)
             self.logger.debug(f"Invalid parameters were passed. {err}")
             return
 
-        generation_json = json.loads(generation.model_dump_json(exclude_none=True, exclude_defaults=True))
-        self.logger.debug(
-            "Generating image with JSON: "
-            + str(generation_json | ({'source_image': 'hidden'} if generation.source_image else {}))
-        )
+        await interaction.response.send_message("Generating image...")
 
-        await interaction.response.send_message("Starting to generate image(s)...")
-        async with self.session.post(
-            f"{self.api_base}/generate/async",
-            headers={"apikey": self.settings.stable_horde_api_key.value},
-            json=generation_json | {"dry_run": True} # We do a dry run to get the kudo cost before continuing
-        ) as response:
-            response_json = await response.json()
-            if (kudo_cost := response_json.get("kudos")) is None or response.status not in (200, 202):
-                self.logger.warn(f"Image generation failed, got response: {response_json}")
-                await interaction.edit_original_response(
-                    content=f"Failed to generate image(s). {response_json.get('message', '')}"
-                )
-                return
-            self.logger.debug(f"Trying to generate an image using {kudo_cost} kudos.")
+        try:
+            kudo_cost = await generation.fetch_kudo_cost()
             if kudo_cost > float(self.settings.max_kudo_cost.value) and not await self.bot.is_owner(interaction.user):
                 await interaction.edit_original_response(content="Failed to generate, operation too expensive.")
                 self.logger.debug("Aborted image generation due to excessive kudo consumption.")
                 return
-
-        async with self.session.post(
-            f"{self.api_base}/generate/async",
-            headers={"apikey": self.settings.stable_horde_api_key.value},
-            json=generation_json
-        ) as response:
-            if response.status != 202:
-                self.logger.warn(f"Image generation failed, api responded with status code: {response.status}")
-                await interaction.edit_original_response(content="Failed to generate image(s).")
-                return
-            response_json = await response.json()
-            kudo_cost = response_json["kudos"]
-            queued_generation = QueuedGeneration(
-                id=response_json["id"],
-                kudos=response_json["kudos"],
-                message=response_json.get("message"),
+            queued_generation = await generation.queue_generation()
+        except GenericHordeError as err:
+            await interaction.edit_original_response(
+                content=f"Failed to generate image. Error: {err.__class__.__name__}"
             )
+            self.logger.debug(f"Image generation failed. {err}")
+            return
 
         # A generation request times out after 10 minutes
         for _ in range((10 * 60) // int(self.settings.time_between_updates.value)):
             try:
-                check = await self.check_generation(queued_generation, full_status=False)
-            except APIError as err:
-                self.logger.warn(f"Image generation failed, api responded with: {err}")
+                check = await queued_generation.check()
+            except GenericHordeError as err:
+                if not isinstance(err, MaintenanceMode):
+                    self.logger.warn(f"Image generation failed. {err}")
                 await interaction.edit_original_response(content="Failed to generate image(s).")
                 return
-            self.logger.debug(f"Generation check for {queued_generation.id}: {check}")
             if check.faulted:
                 self.logger.warn("Image generation failed, generation faulted.")
                 await interaction.edit_original_response(content="Failed to generate image(s).")
@@ -365,7 +332,7 @@ class StableHorde(breadcord.module.ModuleCog):
             await interaction.edit_original_response(
                 content="",
                 embed=discord.Embed(
-                    title="Generation Status",
+                    title="Generation status",
                     description=inspect.cleandoc(
                         f"""
                         Estimated to be done <t:{round(time.time() + check.wait_time)}:R>
@@ -384,7 +351,7 @@ class StableHorde(breadcord.module.ModuleCog):
             )
             await asyncio.sleep(int(self.settings.time_between_updates.value))
 
-        generation_status: GenerationStatus = await self.check_generation(queued_generation, full_status=True)
+        generation_status = await queued_generation.status()
         if not generation_status.generations:
             self.logger.warn("Image generation failed, API didn't respond with any images.")
             await interaction.edit_original_response(content="Failed to generate image(s).")
@@ -395,7 +362,7 @@ class StableHorde(breadcord.module.ModuleCog):
             content="",
             embeds=[
                 discord.Embed(
-                    title="Generation Status",
+                    title="Generation complete",
                     description=inspect.cleandoc(
                         f"""
                         **Prompt:** {generation.positive_prompt}

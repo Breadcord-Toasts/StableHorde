@@ -1,11 +1,12 @@
+import json
 from enum import Enum
 
-from pydantic import BaseModel, constr, Field, conlist, confloat, conint, conset, computed_field
+import aiohttp
+from pydantic import BaseModel, constr, Field, conlist, confloat, conint, conset, computed_field, Extra
 
 __all__ = [
     "GenerationRequest",
     "GenerationParams",
-    "APIError",
     "QueuedGeneration",
     "GenerationCheck",
     "GenerationStatus",
@@ -17,6 +18,9 @@ __all__ = [
     "ControlType",
     "CivitAIData",
 ]
+
+from .constants import HORDE_API_BASE
+from .errors import RequestError
 
 
 # noinspection SpellCheckingInspection
@@ -155,10 +159,75 @@ class GenerationParams(BaseModel):
     )
 
 
+# noinspection LongLine
+class GenerationCheck(BaseModel):
+    finished: int = Field(description="The amount of finished jobs in this request.")
+    processing: int = Field(description="The amount of still processing jobs in this request.")
+    restarted: int = Field(description="The amount of jobs that timed out and had to be restarted or were reported as failed by a worker.")
+    waiting: int = Field(description="The amount of jobs waiting to be picked up by a worker.")
+    done: bool = Field(description="True when all jobs in this request are done. Else False.")
+    faulted: bool = Field(False, description="True when this request caused an internal server error and could not be completed.")
+    wait_time: int = Field(description="The expected amount to wait (in seconds) to generate all jobs in this request.")
+    queue_position: int = Field(description="The position in the requests queue. This position is determined by relative Kudos amounts.")
+    kudos: float = Field(description="The amount of total Kudos this request has consumed until now.")
+    is_possible: bool = Field(description="If False, this request will not be able to be completed with the pool of workers currently available.")
+
+
+class GenerationState(Enum):
+    OK = "ok"
+    CENSORED = "censored"
+
+
+class StableGeneration(BaseModel):
+    worker_id: str = Field(description="The UUID of the worker which generated this image.")
+    worker_name: str = Field(description="The name of the worker which generated this image.")
+    model: str = Field(description="The model which generated this image.")
+    state: GenerationState = Field(GenerationState.OK, description="The state of this generation.")
+    img: str = Field(description="The generated image as a Base64-encoded .webp file.")
+    seed: str = Field(description="The seed which generated this image.")
+    id: str = Field(description="The ID for this image.")
+    censored: bool = Field(description="When true this image has been censored by the worker's safety filter.")
+
+
+class GenerationStatus(GenerationCheck):
+    generations: list[StableGeneration]
+    shared: bool = Field(description="If True, These images have been shared with LAION.")
+
+
+class QueuedGeneration(BaseModel, extra=Extra.allow):
+    def __init__(self, *, session: aiohttp.ClientSession, **kwargs):
+        super().__init__(**kwargs)
+        self.session = session
+
+    id: str = Field(description="The UUID of the request. Use this to retrieve the request status in the future.")
+    kudos: int = Field(description="The expected kudos consumption for this request.")
+    message: str | None = Field(None, description="Any extra information from the horde about this request.")
+
+    async def _fetch_status(self, full: bool) -> GenerationCheck | GenerationStatus:
+        api_endpoint = f"{HORDE_API_BASE}/generate/" + ("status" if full else "check") + f"/{self.id}"
+        async with self.session.get(api_endpoint) as response:
+            response_json = await response.json()
+            if response.status != 200:
+                raise RequestError(response_json["message"], status_code=response.status)
+            return GenerationStatus(**response_json) if full else GenerationCheck(**response_json)
+
+    async def check(self) -> GenerationCheck:
+        """Checks the status of this request."""
+        return await self._fetch_status(full=False)
+
+    async def status(self) -> GenerationStatus:
+        """Checks the full status of this request."""
+        return await self._fetch_status(full=True)
+
+
+
+
+
 # noinspection SpellCheckingInspection
-class GenerationRequest(BaseModel):
-    class Config:
-        use_enum_values = True
+class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
+    def __init__(self, *, session: aiohttp.ClientSession, **kwargs):
+        super().__init__(**kwargs)
+        self.session = session
 
     positive_prompt: constr(min_length=1) = Field(
         description="The positive prompt which will be sent to Stable Diffusion to generate an image.",
@@ -249,50 +318,36 @@ class GenerationRequest(BaseModel):
         description="When false, the endpoint will simply return the cost of the request in kudos and exit."
     )
 
+    async def _make_request(self, dry_run: bool = False) -> QueuedGeneration | int:
+        generation_json = json.loads(self.model_dump_json(exclude_none=True, exclude_defaults=True))
+        generation_json |= {"dry_run": dry_run}
 
-class QueuedGeneration(BaseModel):
-    id: str = Field(description="The UUID of the request. Use this to retrieve the request status in the future.")
-    kudos: int = Field(description="The expected kudos consumption for this request.")
-    message: str | None = Field(None, description="Any extra information from the horde about this request.")
+        async with self.session.post(
+            f"{HORDE_API_BASE}/generate/async",
+            json=generation_json
+        ) as response:
+            response_json: dict = await response.json()
 
+            match tuple(response_json.keys()):
+                case ("kudos",):
+                    return response_json["kudos"]
+                case ("id", "kudos") | ("id", "kudos", "message"):
+                    return QueuedGeneration(
+                        id=response_json["id"],
+                        kudos=response_json["kudos"],
+                        message=response_json.get("message"),
+                        session=self.session
+                    )
+                case _:
+                    print(response_json)
+                    raise RequestError(response_json.get("message", "Unknown error."), status_code=response.status)
 
-# noinspection LongLine
-class GenerationCheck(BaseModel):
-    finished: int = Field(description="The amount of finished jobs in this request.")
-    processing: int = Field(description="The amount of still processing jobs in this request.")
-    restarted: int = Field(description="The amount of jobs that timed out and had to be restarted or were reported as failed by a worker.")
-    waiting: int = Field(description="The amount of jobs waiting to be picked up by a worker.")
-    done: bool = Field(description="True when all jobs in this request are done. Else False.")
-    faulted: bool = Field(False, description="True when this request caused an internal server error and could not be completed.")
-    wait_time: int = Field(description="The expected amount to wait (in seconds) to generate all jobs in this request.")
-    queue_position: int = Field(description="The position in the requests queue. This position is determined by relative Kudos amounts.")
-    kudos: float = Field(description="The amount of total Kudos this request has consumed until now.")
-    is_possible: bool = Field(description="If False, this request will not be able to be completed with the pool of workers currently available.")
+    async def fetch_kudo_cost(self) -> int:
+        return await self._make_request(dry_run=True)
 
+    async def queue_generation(self) -> QueuedGeneration:
+        return await self._make_request()
 
-class GenerationState(Enum):
-    OK = "ok"
-    CENSORED = "censored"
-
-
-class StableGeneration(BaseModel):
-    worker_id: str = Field(description="The UUID of the worker which generated this image.")
-    worker_name: str = Field(description="The name of the worker which generated this image.")
-    model: str = Field(description="The model which generated this image.")
-    state: GenerationState = Field(GenerationState.OK, description="The state of this generation.")
-    img: str = Field(description="The generated image as a Base64-encoded .webp file.")
-    seed: str = Field(description="The seed which generated this image.")
-    id: str = Field(description="The ID for this image.")
-    censored: bool = Field(description="When true this image has been censored by the worker's safety filter.")
-
-
-class GenerationStatus(GenerationCheck):
-    generations: list[StableGeneration]
-    shared: bool = Field(description="If True, These images have been shared with LAION.")
-
-
-class APIError(Exception):
-    pass
 
 
 class ModelType(Enum):

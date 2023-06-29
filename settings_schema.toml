@@ -14,5 +14,6 @@ max_kudo_cost = 10.0
 # Try keep this as high as possible as to not overwelm the horde with requests
 time_between_updates = 6
 
-# What ControlNet model to use, set to "random" for a random model
-avatar_remix_controlnet_model = "fakescribbles"
+# A list of ControlNet models. If multiple models are given a rnadom one will be chosen when generating.
+# Available models are: canny, hed, depth, normal, openpose, seg, scribble, fakescribbles, hough
+avatar_remix_controlnet_models = ["fakescribbles"]

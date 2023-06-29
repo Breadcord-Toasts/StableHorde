@@ -424,7 +424,7 @@ class StableHorde(breadcord.module.ModuleCog):
     async def cog_app_command_error(
         self,
         interaction: discord.Interaction,
-        error: app_commands.AppCommandError
+        error: Exception
     ) -> None:
         async def send_error_message(*args, **kwargs) -> None:
             if interaction.response.is_done():
@@ -471,48 +471,52 @@ class StableHorde(breadcord.module.ModuleCog):
             return
 
     async def remix_user_avatar(self, interaction: discord.Interaction, user: discord.Member) -> None:
-        await interaction.response.send_message(f"Remixing {user.display_name}'s avatar...")
+        try:
+            await interaction.response.send_message(f"Remixing {user.display_name}'s avatar...")
 
-        avatar = user.display_avatar.with_format("webp").with_size(512)
-        interrogation = InterrogationRequest(
-            forms=[InterrogationForm(name=InterrogationType.CAPTION)],
-            source_image=avatar.url,
-            session=self.session
-        )
-        queued_interrogation = await interrogation.request_interrogation()
+            avatar = user.display_avatar.with_format("webp").with_size(512)
+            interrogation = InterrogationRequest(
+                forms=[InterrogationForm(name=InterrogationType.CAPTION)],
+                source_image=avatar.url,
+                session=self.session
+            )
+            queued_interrogation = await interrogation.request_interrogation()
 
-        # An interrogation request times out after 20 minutes
-        for _ in range((20 * 60) // int(self.settings.time_between_updates.value)):
-            status = await queued_interrogation.fetch_status()
-            if status.state == InterrogationStatuses.DONE:
-                break
-            await asyncio.sleep(int(self.settings.time_between_updates.value))
-        else:
-            #TODO: Rename error so it fits better with interrogations AND image generations
-            raise GenerationTimeoutError()
-        prompt = next(iter(status.forms[0].result.values()))
+            # An interrogation request times out after 20 minutes
+            for _ in range((20 * 60) // int(self.settings.time_between_updates.value)):
+                status = await queued_interrogation.fetch_status()
+                if status.state == InterrogationStatuses.DONE:
+                    break
+                await asyncio.sleep(int(self.settings.time_between_updates.value))
+            else:
+                #TODO: Rename error so it fits better with interrogations AND image generations
+                raise GenerationTimeoutError()
+            prompt = next(iter(status.forms[0].result.values()))
 
-        controlnet_model: str = self.settings.avatar_remix_controlnet_model.value.lower()
-        if controlnet_model.lower() == "random":
-            controlnet_model = random.choice(list(ControlType))
+            controlnet_model: ControlType = random.choice(list(map(
+                ControlType,
+                self.settings.avatar_remix_controlnet_models.value
+            )))
 
-        generation = GenerationRequest(
-            positive_prompt=prompt,
-            # models=[model.name] if model else None,
-            source_image=b64encode(await avatar.read()),
-            params=GenerationParams(
-                steps=20,
-                width=512,
-                height=512,
-                control_type=controlnet_model,
-            ),
-            shared=True,
-            r2=False,
-            replacement_filter=True,
+            generation = GenerationRequest(
+                positive_prompt=prompt,
+                # models=[model.name] if model else None,
+                source_image=b64encode(await avatar.read()),
+                params=GenerationParams(
+                    steps=20,
+                    width=512,
+                    height=512,
+                    control_type=controlnet_model.value,
+                ),
+                shared=True,
+                r2=False,
+                replacement_filter=True,
 
-            session=self.session
-        )
-        await self._generate_and_send(interaction, generation, source_image=avatar)
+                session=self.session
+            )
+            await self._generate_and_send(interaction, generation, source_image=avatar)
+        except Exception as error:
+            await self.cog_app_command_error(interaction, error)
 
 
 async def setup(bot: breadcord.Bot):

@@ -22,43 +22,17 @@ from .helpers.errors import (
     MaintenanceModeError,
     InsufficientKudosError,
     FaultedGenerationError,
-    MissingGenerationsError, GenerationTimeoutError
+    MissingGenerationsError,
+    GenerationTimeoutError
 )
 from .helpers.types import *
+from .helpers.utils import fetch_styles, fetch_style_categories, modify_with_style
 
 available_models: list[ActiveModel] = []
+available_styles: dict[str, GenerationRequest] = {} #TODO: use this
+available_style_categories: dict[str, list[str]] = {} #TODO: use this
 # civitai_data: CivitAIData = CivitAIData(models=[], last_indexed_at=0)
-# available_styles: dict[str, dict] = {} #TODO: use this
-# available_style_categories: dict[str, list] = {} #TODO: use this
 
-
-class DeleteButtonView(discord.ui.View):
-    def __init__(self, *, required_votes: int, author_id: int):
-        super().__init__()
-        self.required_votes = required_votes
-        self.author_id = author_id
-        self.votes = []
-
-    @discord.ui.button(emoji="\N{WASTEBASKET}", label="Delete", style=discord.ButtonStyle.red)
-    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if (user := interaction.user.id) not in self.votes:
-            self.votes.append(user)
-        else:
-            self.votes.remove(user)
-
-        vote_count = len(self.votes)
-        button.label = f"Delete ({vote_count}/{self.required_votes})" if vote_count else "Delete"
-
-        if vote_count >= self.required_votes or interaction.user.id == self.author_id:
-            for button in self.children:
-                button.disabled = True
-            await interaction.response.edit_message(attachments=[], view=self)
-            return
-        await interaction.response.edit_message(view=self)
-
-
-def is_diffusion_model(model: ActiveModel) -> bool:
-    return model.type == ModelType.IMAGE
 
 
 class DiffusionModelTransformer(app_commands.Transformer):
@@ -95,35 +69,91 @@ class DiffusionModelTransformer(app_commands.Transformer):
                 key=lambda m: m.name,
                 threshold=60
             )
-        ]
+        ][:25]
 
 
-class LoRATransformer(app_commands.Transformer):
-    def transform(self, interaction: discord.Interaction, value: str, /) -> LoRA | None:
-        value = value.strip()
-        for lora in civitai_data.models:
-            if lora.name.strip() == value:
-                return lora
+# class LoRATransformer(app_commands.Transformer):
+#     def transform(self, interaction: discord.Interaction, value: str, /) -> LoRA | None:
+#         value = value.strip()
+#         for lora in civitai_data.models:
+#             if lora.name.strip() == value:
+#                 return lora
+#
+#     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+#         def get_choice(lora: LoRA) -> app_commands.Choice:
+#             return app_commands.Choice(
+#                 name=lora.name.strip(),
+#                 value=lora.name,
+#             )
+#
+#         if not value:
+#             return [get_choice(lora) for lora in civitai_data.models[:25]]
+#
+#         return [
+#             get_choice(lora)
+#             for lora in breadcord.helpers.search_for(
+#                 query=value,
+#                 objects=list(civitai_data.models),
+#                 key=lambda m: m.name,
+#                 threshold=60
+#             )
+#         ]
+
+
+class StyleTransformer(app_commands.Transformer):
+
+    def transform(self, interaction: discord.Interaction, value: str, /) -> str:
+        return value.strip()
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
-        def get_choice(lora: LoRA) -> app_commands.Choice:
-            return app_commands.Choice(
-                name=lora.name.strip(),
-                value=lora.name,
-            )
-
-        if not value:
-            return [get_choice(lora) for lora in civitai_data.models[:25]]
+        style_choices = (
+            list(map(
+                lambda style: (style, style),
+                available_styles.keys()
+            )) + list(map(
+                lambda style: (f"{style} (category)", style),
+                available_style_categories.keys()
+            ))
+        )
 
         return [
-            get_choice(lora)
-            for lora in breadcord.helpers.search_for(
+            app_commands.Choice(name=style[0], value=style[1])
+            for style in breadcord.helpers.search_for(
                 query=value,
-                objects=list(civitai_data.models),
-                key=lambda m: m.name,
+                objects=style_choices,
+                key=lambda style: style[0],
                 threshold=60
             )
-        ]
+        ][:25]
+
+
+class DeleteButtonView(discord.ui.View):
+    def __init__(self, *, required_votes: int, author_id: int):
+        super().__init__()
+        self.required_votes = required_votes
+        self.author_id = author_id
+        self.votes = []
+
+    @discord.ui.button(emoji="\N{WASTEBASKET}", label="Delete", style=discord.ButtonStyle.red)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if (user := interaction.user.id) not in self.votes:
+            self.votes.append(user)
+        else:
+            self.votes.remove(user)
+
+        vote_count = len(self.votes)
+        button.label = f"Delete ({vote_count}/{self.required_votes})" if vote_count else "Delete"
+
+        if vote_count >= self.required_votes or interaction.user.id == self.author_id:
+            for button in self.children:
+                button.disabled = True
+            await interaction.response.edit_message(attachments=[], view=self)
+            return
+        await interaction.response.edit_message(view=self)
+
+
+def is_diffusion_model(model: ActiveModel) -> bool:
+    return model.type == ModelType.IMAGE
 
 
 class StableHorde(breadcord.module.ModuleCog):
@@ -149,38 +179,36 @@ class StableHorde(breadcord.module.ModuleCog):
             await self.session.close()
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
 
-    @tasks.loop(hours=24)
+    @tasks.loop(hours=12)
     async def update_data(self, *, force_update: bool = False) -> None:
+        self.logger.debug("Fetching horde models")
         async with self.session.get(f"{HORDE_API_BASE}/status/models", params={"type": "image"}) as response:
             global available_models
             available_models = list(map(
                 lambda m: ActiveModel(**m),
                 await response.json()
             ))
-            self.logger.debug("Fetched horde models")
+        self.logger.debug("Fetched horde models")
+
+        global available_styles
+        self.logger.debug("Loading styles")
+        available_styles = await fetch_styles(
+            session=self.session,
+            storage_file_path=self.module.storage_path / "styles_cache.json",
+        )
+        self.logger.debug("Loaded styles")
+
+        global available_style_categories
+        self.logger.debug("Loading style categories")
+        available_style_categories = await fetch_style_categories(
+            session=self.session,
+            storage_file_path=self.module.storage_path / "style_categories_cache.json",
+        )
+        self.logger.debug("Loaded style categories")
 
         return
         # TODO: make this nonsense less awful
         # noinspection PyUnreachableCode
-
-        async with self.session.get(
-            "https://raw.githubusercontent.com/Haidra-Org/AI-Horde-Styles/main/styles.json"
-        ) as response:
-            global available_styles
-            available_styles = json.loads(await response.read())
-            # Why are these two formatted differently from all the others? Who knows!
-            with contextlib.suppress(KeyError):
-                del available_styles["raw"]
-            with contextlib.suppress(KeyError):
-                del available_styles["raw2"]
-            self.logger.debug("Fetched styles")
-        async with self.session.get(
-            "https://raw.githubusercontent.com/Haidra-Org/AI-Horde-Styles/main/categories.json"
-        ) as response:
-            global available_style_categories
-            available_style_categories = json.loads(await response.read())
-            self.logger.debug("Fetched style categories")
-
         global civitai_data
         civitai_models_file = self.module.storage_path / "civitai_model_cache.json"
         with contextlib.suppress(json.JSONDecodeError):
@@ -354,10 +382,14 @@ class StableHorde(breadcord.module.ModuleCog):
         width: int = 512,
         height: int = 512,
         steps: int = 25,
+        style: app_commands.Transform[str | None, StyleTransformer] = None,
         seed: str | None = None,
         cfg_scale: float = 7.5,
         post_processing: PostProcessors | None = None, # Technically supports a list of postprocessors, but too bad!
-        lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
+
+        lora: str = None,
+        #TODO: lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
+
         source_image: discord.Attachment | None = None,
         source_processing: SourceProcessors | None = None,
         source_mask: discord.Attachment | None = None,
@@ -366,14 +398,9 @@ class StableHorde(breadcord.module.ModuleCog):
         tiling: bool = False,
         hires_fix: bool = False,
         n: int = 1,
-        #TODO: add style support using https://github.com/Haidra-Org/AI-Horde-Styles
-        # Why does it need to use the quirkiest format known to man?
-        # Do i seriously need to write a function that converts a style to a GenerationRequest object?
-        # Why is the format of the prompt field of the `raw` and `raw2` styles different from all others?
-        # How does the official implementations manage to parse this mess? Oh wait, I know! Spaghetti!
-        # style: app_commands.Transform[str | None, StyleTransformer] = None
     ) -> None:
-        nsfw = nsfw or lora.nsfw if lora else nsfw
+        #TODO: nsfw = nsfw or lora.nsfw if lora else nsfw
+
         # Cut off due to embed limits. There's no real reason to get this high with most normal prompts anyway
         positive_prompt, negative_prompt = positive_prompt[:1536], negative_prompt[:1536]
         try:
@@ -387,7 +414,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 source_mask=b64encode(await source_mask.read()) if source_processing in [
                     SourceProcessors.INPAINTING,
                     SourceProcessors.OUTPAINTING
-                ] else None,
+                ] and source_mask else None,
                 params=GenerationParams(
                     cfg_scale=cfg_scale,
                     seed=seed,
@@ -399,7 +426,10 @@ class StableHorde(breadcord.module.ModuleCog):
                     hires_fix=hires_fix,
                     post_processing=post_processing,
                     control_type=control_type,
-                    loras=[lora.model_dump()] if lora else None,
+
+                    #TODO: loras=[lora.model_dump()] if lora else None,
+                    loras=[lora] if lora else None,
+
                     return_control_map=return_control_map
                 ),
                 shared=True,
@@ -412,6 +442,9 @@ class StableHorde(breadcord.module.ModuleCog):
         except pydantic.ValidationError:
             await interaction.response.send_message("Invalid parameter(s).", ephemeral=True)
             return
+
+        if style:
+            generation = modify_with_style(generation, available_styles[style])
 
         await self._generate_and_send(interaction, generation, source_image=source_image)
 

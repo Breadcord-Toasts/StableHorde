@@ -255,7 +255,15 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
     @property
     def prompt(self) -> str:
         """The prompt which will be sent to Stable Diffusion to generate an image."""
-        return f"{self.positive_prompt}" + (f"###{self.negative_prompt}" if self.negative_prompt != "" else "")
+        return self.positive_prompt + (f"###{self.negative_prompt}" if self.negative_prompt else "")
+
+    @prompt.setter
+    def prompt(self, value: str) -> None:
+        if "###" in value:
+            self.positive_prompt, self.negative_prompt = value.split("###", maxsplit=1)
+        else:
+            self.positive_prompt = value
+            self.negative_prompt = ""
 
     params: GenerationParams | None = None
 
@@ -326,8 +334,18 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
         description="When false, the endpoint will simply return the cost of the request in kudos and exit."
     )
 
-    def dump_json_dict(self) -> dict:
-        return json.loads(self.model_dump_json(exclude_none=True, exclude_defaults=True))
+    def dump_json_dict(
+        self,
+        *,
+        include: set[str] | list[str] | None = None,
+        exclude: set[str] | list[str] | None = None
+    ) -> dict:
+        return json.loads(self.model_dump_json(
+            exclude_none=True,
+            exclude_defaults=True,
+            include=set(include) if include else None,
+            exclude=set(exclude) if exclude else None,
+        ))
 
     async def _make_request(self, dry_run: bool = False) -> QueuedGeneration | int:
         async with self.session.post(
@@ -347,6 +365,7 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
                         session=self.session
                     )
                 case _:
+                    print(response_json)
                     raise RequestError(response_json.get("message", "Unknown error."), status_code=response.status)
 
     async def fetch_kudo_cost(self) -> int:
@@ -436,7 +455,7 @@ class InterrogationForm(BaseModel, use_enum_values=True):
     payload: dict | None = None  # ?????????
 
 
-# Corresponds to "ModelInterrogationInputStable" in the official docs but
+# Corresponds to "ModelInterrogationInputStable" in the official docs
 # was renamed for consistency with "GenerationRequest"
 # noinspection LongLine
 class InterrogationRequest(BaseModel, extra=Extra.allow):

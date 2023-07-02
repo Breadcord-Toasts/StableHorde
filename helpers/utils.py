@@ -1,5 +1,7 @@
+import asyncio
 import contextlib
 import json
+import logging
 import time
 from json import JSONDecodeError
 from pathlib import Path
@@ -11,36 +13,34 @@ import aiohttp
 from .constants import STYLES_URL, STYLE_CATEGORIES_URL
 from .types import GenerationParams, GenerationRequest, LoRA
 
+# Objects supported by json.JSONDecoder
+JSONSerializable = dict["JSONSerializable"] | list["JSONSerializable"] | str | int | float | bool | None
+
 
 async def _request_with_cache(
     *,
     session: aiohttp.ClientSession,
     request_args: dict,
     cache_file_path: Path,
-    # Objects supported by json.JSONDecoder
-    data_parser : Callable[
-        [dict | list | str | int | float | bool | None],
-        tuple[Any, dict | list | str | int | float | bool | None]
-    ] = lambda x: x,
+    data_parser : Callable[[JSONSerializable], tuple[Any, JSONSerializable]] = lambda x: x,
     dump_with_indent: bool = False
-) -> Any:
+) -> JSONSerializable:
     # If a valid cache is found, we return whatever value it holds, otherwise an exception is raised and we continue
-    if cache_file_path.is_file():
-        try:
-            async with aiofiles.open(cache_file_path, "r", encoding="utf-8") as cache_file:
-                cache_json: dict = json.loads(await cache_file.read())
-            assert cache_json.get("saved_at", 0) + 60*60*24*2 > time.time()
-            assert (data := cache_json.get("data")) is not None
-        except (AssertionError, JSONDecodeError):
-            pass
-        else:
-            # If it errors we just move on to fetching new data
-            with contextlib.suppress(Exception):
-                return_data, json_data = data_parser(data)
-                return return_data
+    try:
+        assert cache_file_path.is_file()
+        async with aiofiles.open(cache_file_path, "r", encoding="utf-8") as cache_file:
+            cache_json: dict = json.loads(await cache_file.read())
+        assert cache_json.get("saved_at", 0) + 60*60*24*2 > time.time()
+        assert (data := cache_json.get("data")) is not None
+    except (AssertionError, JSONDecodeError):
+        pass
+    else:
+        with contextlib.suppress(Exception):
+            return_data, json_data = data_parser(data)
+            return return_data
 
     async with session.get(**request_args) as response:
-        data: dict = await response.json()
+        data: JSONSerializable = await response.json()
         # Using a user-supplied function here is a bit messy, but it gives us the most flexibility
         # but since it's a private function mainly meant to be used by functions that fetch specific things, it's fine
         return_data, json_data = data_parser(data)
@@ -57,7 +57,7 @@ async def _request_with_cache(
 
 
 async def fetch_styles(*, session: aiohttp.ClientSession, storage_file_path: Path) -> dict[str, GenerationRequest]:
-    def parse(style_data: Any) -> GenerationRequest:
+    def parse(style_data: JSONSerializable) -> GenerationRequest:
         prompt: str = style_data.pop("prompt") # type: ignore
         if "{np}" in prompt and "###" not in prompt:
             prompt = prompt.replace("{np}", "###{np}")
@@ -106,12 +106,11 @@ async def fetch_styles(*, session: aiohttp.ClientSession, storage_file_path: Pat
             "headers": {"Accept": "application/vnd.github.raw+json"}
         },
         cache_file_path=storage_file_path,
-        data_parser=data_parser,
-        dump_with_indent=True
+        data_parser=data_parser
     )
 
 async def fetch_style_categories(*, session: aiohttp.ClientSession, storage_file_path: Path) -> dict[str, list[str]]:
-    def data_parser(data: dict) -> tuple[Any, dict | list | str | int | float | bool | None]:
+    def data_parser(data: JSONSerializable) -> tuple[Any, JSONSerializable]:
         if not isinstance(data, dict):
             raise ValueError("Github's API did not respond with a dictionary.")
         if not all(
@@ -131,9 +130,56 @@ async def fetch_style_categories(*, session: aiohttp.ClientSession, storage_file
             "headers": {"Accept": "application/vnd.github.raw+json"}
         },
         cache_file_path=storage_file_path,
-        data_parser=data_parser,
-        dump_with_indent=True
+        data_parser=data_parser
     )
+
+async def fetch_loras(*, session: aiohttp.ClientSession, storage_file_path: Path, logger: logging.Logger) -> list[LoRA]:
+    try:
+        assert storage_file_path.is_file()
+        async with aiofiles.open(storage_file_path, "r", encoding="utf-8") as cache_file:
+            cache_json: dict = json.loads(await cache_file.read())
+        assert cache_json.get("saved_at", 0) + 60*60*24*2 > time.time()
+        assert (data := cache_json.get("data")) is not None
+        return [LoRA(**lora) for lora in data]
+    except (AssertionError, JSONDecodeError):
+        civitai_data: list[LoRA] = []
+        next_page = "https://civitai.com/api/v1/models?limit=100&&types=LORA&page=1"
+        while next_page is not None:
+            async with session.get(next_page) as response:
+                logger.debug(f"Fetching LoRAs from {next_page}")
+                response_json = await response.json()
+                civitai_data.extend(
+                    LoRA(
+                        name=str(lora["id"]),
+                        actual_name=lora["name"],
+                        inject_trigger="any",
+                        nsfw=lora.get("nsfw", False),
+                        tags=lora.get("tags", []),
+                    )
+                    for lora in response_json.get("items", [])
+                )
+                next_page = response_json.get("metadata", {}).get("nextPage")
+                await asyncio.sleep(1)
+
+        async with aiofiles.open(storage_file_path, "w", encoding="utf-8") as cache_file:
+            await cache_file.write(json.dumps(
+                {
+                    "saved_at": time.time(),
+                    "data": [
+                        dict(
+                            name=lora.name,
+                            model=lora.model,
+                            clip=lora.clip,
+                            inject_trigger=lora.inject_trigger,
+                            nsfw=lora.nsfw,
+                            tags=lora.tags,
+                            actual_name=lora.actual_name,
+                        )
+                        for lora in civitai_data
+                    ]
+                }
+            ))
+        return civitai_data
 
 
 def modify_with_style(
@@ -162,6 +208,10 @@ def modify_with_style(
             new_generation.params = GenerationParams(**params)
 
     return new_generation
+
+
+def embed_desc_from_dict(info: dict) -> str:
+    return "".join(f"**{key}:** {value}\n" for key, value in info.items() if value is not None)
 
 
 

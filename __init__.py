@@ -1,14 +1,11 @@
 import asyncio
-import contextlib
 import inspect
 import io
-import json
 import random
 import re
 import time
 from base64 import b64encode, b64decode
 
-import aiofiles
 import aiohttp
 import discord
 import pydantic
@@ -26,12 +23,12 @@ from .helpers.errors import (
     GenerationTimeoutError
 )
 from .helpers.types import *
-from .helpers.utils import fetch_styles, fetch_style_categories, modify_with_style
+from .helpers.utils import fetch_styles, fetch_style_categories, modify_with_style, embed_desc_from_dict, fetch_loras
 
 available_models: list[ActiveModel] = []
-available_styles: dict[str, GenerationRequest] = {} #TODO: use this
-available_style_categories: dict[str, list[str]] = {} #TODO: use this
-# civitai_data: CivitAIData = CivitAIData(models=[], last_indexed_at=0)
+available_styles: dict[str, GenerationRequest] = {}
+available_style_categories: dict[str, list[str]] = {}
+available_loras: list[LoRA] = []
 
 
 
@@ -72,38 +69,12 @@ class DiffusionModelTransformer(app_commands.Transformer):
         ][:25]
 
 
-# class LoRATransformer(app_commands.Transformer):
-#     def transform(self, interaction: discord.Interaction, value: str, /) -> LoRA | None:
-#         value = value.strip()
-#         for lora in civitai_data.models:
-#             if lora.name.strip() == value:
-#                 return lora
-#
-#     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
-#         def get_choice(lora: LoRA) -> app_commands.Choice:
-#             return app_commands.Choice(
-#                 name=lora.name.strip(),
-#                 value=lora.name,
-#             )
-#
-#         if not value:
-#             return [get_choice(lora) for lora in civitai_data.models[:25]]
-#
-#         return [
-#             get_choice(lora)
-#             for lora in breadcord.helpers.search_for(
-#                 query=value,
-#                 objects=list(civitai_data.models),
-#                 key=lambda m: m.name,
-#                 threshold=60
-#             )
-#         ]
-
-
 class StyleTransformer(app_commands.Transformer):
-
-    def transform(self, interaction: discord.Interaction, value: str, /) -> str:
-        return value.strip()
+    def transform(self, interaction: discord.Interaction, value: str, /) -> GenerationRequest | None:
+        value = value.removesuffix(" (category)").strip()
+        if value in available_style_categories:
+            value = random.choice(available_style_categories.get(value, []))
+        return value
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
         style_choices = (
@@ -122,7 +93,25 @@ class StyleTransformer(app_commands.Transformer):
                 query=value,
                 objects=style_choices,
                 key=lambda style: style[0],
-                threshold=60
+            )
+        ][:25]
+
+
+class LoRATransformer(app_commands.Transformer):
+    def transform(self, interaction: discord.Interaction, value: str, /) -> LoRA | None:
+        value = value.strip()
+        for lora in available_loras:
+            if value in (lora.name, lora.actual_name.strip()):
+                return lora
+
+    async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+        print(len(available_loras))
+        return [
+            app_commands.Choice(name=lora.actual_name.strip(), value=lora.name)
+            for lora in breadcord.helpers.search_for(
+                query=value,
+                objects=available_loras,
+                key=lambda lora: lora.actual_name + "\n".join(lora.tags),
             )
         ][:25]
 
@@ -206,41 +195,15 @@ class StableHorde(breadcord.module.ModuleCog):
         )
         self.logger.debug("Loaded style categories")
 
-        return
-        # TODO: make this nonsense less awful
-        # noinspection PyUnreachableCode
-        global civitai_data
-        civitai_models_file = self.module.storage_path / "civitai_model_cache.json"
-        with contextlib.suppress(json.JSONDecodeError):
-            if civitai_models_file.is_file():
-                self.logger.debug("Loading civitai model cache")
-                async with aiofiles.open(civitai_models_file, "r", encoding="utf8") as file:
-                    data = json.loads(await file.read())
-                    civitai_data = CivitAIData(
-                        models=[LoRA(name=lora["name"], inject_trigger="any") for lora in data["models"]],
-                        last_indexed_at=data.get("last_indexed_at", 0)
-                    )
-                self.logger.debug("Loaded civitai model cache")
+        global available_loras
+        self.logger.debug("Loading loras")
+        available_loras = await fetch_loras(
+            session=self.session,
+            storage_file_path=self.module.storage_path / "civitai_cache.json",
+            logger=self.logger,
+        )
+        self.logger.debug("Loaded loras")
 
-        if civitai_data.last_indexed_at + (60 * 60 * 24) < time.time() or force_update:
-            civitai_data = CivitAIData(models=[], last_indexed_at=round(time.time()))
-            next_page = "https://civitai.com/api/v1/models?limit=100&&types=LORA&page=1"
-            while next_page:
-                async with self.session.get(next_page) as response:
-                    response_json = await response.json()
-                    civitai_data.models.extend(
-                        LoRA(name=lora["name"], inject_trigger="any", nsfw=lora.get("nsfw", False))
-                        for lora in response_json.get("items", [])
-                    )
-                    self.logger.debug(f"Fetched page from civitai: {next_page}")
-                    next_page = response_json.get("metadata", {}).get("nextPage")
-                    await asyncio.sleep(1)
-            self.logger.debug("Finished fetching civitai pages")
-
-            async with aiofiles.open(civitai_models_file, "w", encoding="utf8") as file:
-                self.logger.debug("Saving civitai model cache")
-                await file.write(civitai_data.model_dump_json())
-                self.logger.debug(f"Saved civitai model cache with {len(civitai_data.models)} models")
 
     async def _generate_and_send(
         self,
@@ -305,17 +268,20 @@ class StableHorde(breadcord.module.ModuleCog):
                     title="Generation complete",
                     description=inspect.cleandoc(
                         f"""
-                        **Prompt:** {generation.positive_prompt}
-                        **Negative prompt:** {generation.negative_prompt or None}
-                        **Seed:** {finished_generation.seed}
-                        **Model:** {finished_generation.model}
-                        **Marked as NSFW:** {generation.nsfw}
-                        **Lora:** {lora.name if lora else None}
-                        **ControlNet type:** {control_type.value.lower() if control_type else None}
-
+                        {embed_desc_from_dict({
+                            "Prompt": generation.positive_prompt,
+                            "Negative prompt": generation.negative_prompt or None,
+                            "Seed": finished_gen.seed,
+                            "Model": finished_gen.model,
+                            "Marked as NSFW": generation.nsfw,
+                            "Lora": f"`{lora.actual_name}`" if lora else None,
+                            "ControlNet type": control_type.value.lower() if control_type else None,
+                        })}
                         ### **Horde metadata**
-                        **Finished by worker:** {finished_generation.worker_name} (`{finished_generation.worker_id}`)
-                        **Total kudo cost:** {generation_status.kudos}
+                        {embed_desc_from_dict({
+                            "Finished by worker": f"{finished_gen.worker_name} (`{finished_gen.worker_id}`)",
+                            "Total kudo cost": generation_status.kudos
+                        })}
                         """
                     ),
                 ).set_author(
@@ -324,7 +290,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 ).set_thumbnail(
                     url=source_image.url if source_image else None
                 )
-                for finished_generation in generation_status.generations
+                for finished_gen in generation_status.generations
             ],
             attachments=[
                 discord.File(
@@ -358,6 +324,7 @@ class StableHorde(breadcord.module.ModuleCog):
         width="The width of the generated image. Has to be a multiple of 64 and between 64 and 3072",
         height="The height of the generated image. Has to be a multiple of 64 and between 64 and 3072",
         steps="The number of steps to run for",
+        style='A "preset" to use for generation',
         seed="The seed to use for generation",
         cfg_scale="How closely the AI should adhere to your prompt (cfg = classifier free guidance)",
         n="The number of images to generate",
@@ -368,7 +335,7 @@ class StableHorde(breadcord.module.ModuleCog):
         source_processing="What to use the source image for",
         source_mask="The mask to use for in/outpainting. If left blank the source image's alpha layer will be used",
         control_type="If specified, this dictates what ControlNet model will be used on the source image",
-        lora="What LoRA model to use. LoRAs allow putting custom concepts into the prompt",
+        lora="What LoRA model to use. LoRAs allow embedding custom concepts into a generation",
         return_control_map="Requires controlnet_model to be specified. Whether or not to return the controlnet map instead of a generated image",
     )
     @app_commands.checks.cooldown(1, 10)
@@ -382,14 +349,11 @@ class StableHorde(breadcord.module.ModuleCog):
         width: int = 512,
         height: int = 512,
         steps: int = 25,
-        style: app_commands.Transform[str | None, StyleTransformer] = None,
+        style: app_commands.Transform[GenerationRequest | None, StyleTransformer] = None,
         seed: str | None = None,
         cfg_scale: float = 7.5,
         post_processing: PostProcessors | None = None, # Technically supports a list of postprocessors, but too bad!
-
-        lora: str = None,
-        #TODO: lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
-
+        lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
         source_image: discord.Attachment | None = None,
         source_processing: SourceProcessors | None = None,
         source_mask: discord.Attachment | None = None,
@@ -399,7 +363,7 @@ class StableHorde(breadcord.module.ModuleCog):
         hires_fix: bool = False,
         n: int = 1,
     ) -> None:
-        #TODO: nsfw = nsfw or lora.nsfw if lora else nsfw
+        nsfw = nsfw or lora.nsfw if lora else nsfw
 
         # Cut off due to embed limits. There's no real reason to get this high with most normal prompts anyway
         positive_prompt, negative_prompt = positive_prompt[:1536], negative_prompt[:1536]
@@ -426,10 +390,7 @@ class StableHorde(breadcord.module.ModuleCog):
                     hires_fix=hires_fix,
                     post_processing=post_processing,
                     control_type=control_type,
-
-                    #TODO: loras=[lora.model_dump()] if lora else None,
                     loras=[lora] if lora else None,
-
                     return_control_map=return_control_map
                 ),
                 shared=True,

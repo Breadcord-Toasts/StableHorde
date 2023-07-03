@@ -266,8 +266,9 @@ class StableHorde(breadcord.module.ModuleCog):
             embeds=[
                 discord.Embed(
                     title="Generation complete",
-                    description=inspect.cleandoc(
-                        f"""
+                    description="\n".join(
+                        line.lstrip()
+                        for line in f"""
                         {embed_desc_from_dict({
                             "Prompt": generation.positive_prompt,
                             "Negative prompt": generation.negative_prompt or None,
@@ -282,7 +283,7 @@ class StableHorde(breadcord.module.ModuleCog):
                             "Finished by worker": f"{finished_gen.worker_name} (`{finished_gen.worker_id}`)",
                             "Total kudo cost": generation_status.kudos
                         })}
-                        """
+                        """.splitlines()
                     ),
                 ).set_author(
                     name=interaction.user.display_name,

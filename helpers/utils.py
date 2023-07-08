@@ -138,28 +138,32 @@ async def fetch_loras(*, session: aiohttp.ClientSession, storage_file_path: Path
         assert storage_file_path.is_file()
         async with aiofiles.open(storage_file_path, "r", encoding="utf-8") as cache_file:
             cache_json: dict = json.loads(await cache_file.read())
-        assert cache_json.get("saved_at", 0) + 60*60*24*2 > time.time()
+        assert cache_json.get("saved_at", 0) + 60*60*24*3 > time.time()
         assert (data := cache_json.get("data")) is not None
         return [LoRA(**lora) for lora in data]
     except (AssertionError, JSONDecodeError):
         civitai_data: list[LoRA] = []
-        next_page = "https://civitai.com/api/v1/models?limit=100&&types=LORA&page=1"
-        while next_page is not None:
+        metadata: dict[str, Any] = {
+            "nextPage": "https://civitai.com/api/v1/models?limit=100&&types=LORA&page=1"
+        }
+        while next_page := metadata.get("nextPage"):
+            current_page = metadata.get('currentPage', 0) + 1
+            total_pages = metadata.get("totalPages", "unknown")
+            logger.debug(f"Fetching LoRAs from {next_page} (page {current_page}/{total_pages})")
             async with session.get(next_page) as response:
-                logger.debug(f"Fetching LoRAs from {next_page}")
                 response_json = await response.json()
-                civitai_data.extend(
-                    LoRA(
-                        name=str(lora["id"]),
-                        actual_name=lora["name"],
-                        inject_trigger="any",
-                        nsfw=lora.get("nsfw", False),
-                        tags=lora.get("tags", []),
-                    )
-                    for lora in response_json.get("items", [])
+            civitai_data.extend(
+                LoRA(
+                    name=str(lora["id"]),
+                    actual_name=lora["name"],
+                    inject_trigger="any",
+                    nsfw=lora.get("nsfw", False),
+                    tags=lora.get("tags", []),
                 )
-                next_page = response_json.get("metadata", {}).get("nextPage")
-                await asyncio.sleep(1)
+                for lora in response_json.get("items", [])
+            )
+            metadata = response_json.get("metadata", {})
+            await asyncio.sleep(1)
 
         async with aiofiles.open(storage_file_path, "w", encoding="utf-8") as cache_file:
             await cache_file.write(json.dumps(

@@ -105,9 +105,8 @@ class LoRATransformer(app_commands.Transformer):
                 return lora
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
-        print(len(available_loras))
         return [
-            app_commands.Choice(name=lora.actual_name.strip(), value=lora.name)
+            app_commands.Choice(name=lora.actual_name.strip(), value=lora.name.strip())
             for lora in breadcord.helpers.search_for(
                 query=value,
                 objects=available_loras,
@@ -181,28 +180,40 @@ class StableHorde(breadcord.module.ModuleCog):
 
         global available_styles
         self.logger.debug("Loading styles")
-        available_styles = await fetch_styles(
-            session=self.session,
-            storage_file_path=self.module.storage_path / "styles_cache.json",
-        )
-        self.logger.debug("Loaded styles")
+        try:
+            available_styles = await fetch_styles(
+                session=self.session,
+                storage_file_path=self.module.storage_path / "styles_cache.json",
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to load styles: {e}")
+        else:
+            self.logger.debug("Loaded styles")
 
         global available_style_categories
         self.logger.debug("Loading style categories")
-        available_style_categories = await fetch_style_categories(
-            session=self.session,
-            storage_file_path=self.module.storage_path / "style_categories_cache.json",
-        )
-        self.logger.debug("Loaded style categories")
+        try:
+            available_style_categories = await fetch_style_categories(
+                session=self.session,
+                storage_file_path=self.module.storage_path / "style_categories_cache.json",
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to load style categories: {e}")
+        else:
+            self.logger.debug("Loaded style categories")
 
         global available_loras
         self.logger.debug("Loading loras")
-        available_loras = await fetch_loras(
-            session=self.session,
-            storage_file_path=self.module.storage_path / "civitai_cache.json",
-            logger=self.logger,
-        )
-        self.logger.debug("Loaded loras")
+        try:
+            available_loras = await fetch_loras(
+                session=self.session,
+                storage_file_path=self.module.storage_path / "lora_cache.json",
+                logger=self.logger,
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to load loras: {e}")
+        else:
+            self.logger.debug("Loaded loras")
 
 
     async def _generate_and_send(
@@ -226,7 +237,7 @@ class StableHorde(breadcord.module.ModuleCog):
         queued_generation = await generation.request_generation()
 
         # A generation request times out after 10 minutes
-        for _ in range((10 * 60) // int(self.settings.time_between_updates.value)):
+        for _ in range((10 * 60) // int(self.settings.horde_api_wait_time.value)):
             check = await queued_generation.check()
             if check.faulted:
                 raise FaultedGenerationError()
@@ -252,7 +263,7 @@ class StableHorde(breadcord.module.ModuleCog):
                     url=source_image.url if source_image else None
                 )
             )
-            await asyncio.sleep(int(self.settings.time_between_updates.value))
+            await asyncio.sleep(int(self.settings.horde_api_wait_time.value))
         else:
             raise GenerationTimeoutError()
 
@@ -478,11 +489,11 @@ class StableHorde(breadcord.module.ModuleCog):
             queued_interrogation = await interrogation.request_interrogation()
 
             # An interrogation request times out after 20 minutes
-            for _ in range((20 * 60) // int(self.settings.time_between_updates.value)):
+            for _ in range((20 * 60) // int(self.settings.horde_api_wait_time.value)):
                 status = await queued_interrogation.fetch_status()
                 if status.state == InterrogationStatuses.DONE:
                     break
-                await asyncio.sleep(int(self.settings.time_between_updates.value))
+                await asyncio.sleep(int(self.settings.horde_api_wait_time.value))
             else:
                 #TODO: Rename error so it fits better with interrogations AND image generations
                 raise GenerationTimeoutError()

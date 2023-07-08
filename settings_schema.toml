@@ -12,7 +12,7 @@ max_kudo_cost = 10.0
 
 # THe time to wait inbetween fetching the generation status from the horde.
 # Try keep this as high as possible as to not overwelm the horde with requests
-time_between_updates = 6
+horde_api_wait_time = 6
 
 # A list of ControlNet models. If multiple models are given a rnadom one will be chosen when generating.
 # Available models are: canny, hed, depth, normal, openpose, seg, scribble, fakescribbles, hough

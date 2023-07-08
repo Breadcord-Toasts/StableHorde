@@ -278,15 +278,14 @@ class StableHorde(breadcord.module.ModuleCog):
                 discord.Embed(
                     title="Generation complete",
                     description="\n".join(
-                        line.lstrip()
-                        for line in f"""
+                        line.lstrip() for line in f"""
                         {embed_desc_from_dict({
                             "Prompt": generation.positive_prompt,
                             "Negative prompt": generation.negative_prompt or None,
                             "Seed": finished_gen.seed,
                             "Model": finished_gen.model,
                             "Marked as NSFW": generation.nsfw,
-                            "Lora": f"`{lora.actual_name}`" if lora else None,
+                            "Lora": f"`{lora.actual_name}` ({lora.name})" if lora else None,
                             "ControlNet type": control_type.value.lower() if control_type else None,
                         })}
                         ### **Horde metadata**

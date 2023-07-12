@@ -163,7 +163,7 @@ async def fetch_loras(*, session: aiohttp.ClientSession, storage_file_path: Path
                 for lora in response_json.get("items", [])
             )
             metadata = response_json.get("metadata", {})
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
         async with aiofiles.open(storage_file_path, "w", encoding="utf-8") as cache_file:
             await cache_file.write(json.dumps(

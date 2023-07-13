@@ -62,7 +62,7 @@ class DiffusionModelTransformer(app_commands.Transformer):
             get_choice(model)
             for model in breadcord.helpers.search_for(
                 query=value,
-                objects=list(available_models),
+                objects=available_models,
                 key=lambda m: m.name,
                 threshold=60
             )

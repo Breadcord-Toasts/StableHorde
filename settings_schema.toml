@@ -6,3 +6,14 @@ stable_horde_api_key = "0000000000"
 # How many votes are needed for a generated image to be deleted, useful in case it happens to be NSFW
 # Set to -1 to disable image deletion
 required_deletion_votes = 2
+
+# The maximum ammount of kudos a generation request can require
+max_kudo_cost = 10.0
+
+# THe time to wait inbetween fetching the generation status from the horde.
+# Try keep this as high as possible as to not overwelm the horde with requests
+horde_api_wait_time = 6
+
+# A list of ControlNet models. If multiple models are given a rnadom one will be chosen when generating.
+# Available models are: canny, hed, depth, normal, openpose, seg, scribble, fakescribbles, hough
+avatar_remix_controlnet_models = ["fakescribbles"]

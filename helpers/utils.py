@@ -1,116 +1,222 @@
-import base64
-import io
-from typing import Literal
+import asyncio
+import contextlib
+import json
+import logging
+import time
+from json import JSONDecodeError
+from pathlib import Path
+from typing import Callable, Any
+
+import aiofiles
+import aiohttp
+
+from .constants import STYLES_URL, STYLE_CATEGORIES_URL
+from .types import GenerationParams, GenerationRequest, LoRA
+
+# Objects supported by json.JSONDecoder
+JSONSerializable = dict["JSONSerializable"] | list["JSONSerializable"] | str | int | float | bool | None
 
 
-class ImageGenerationInputParams:
-    def __init__(
-        self,
-        sampler_name: str | None = None,
-        cfg_scale: float | None = None,
-        denoising_strength: float | None = None,
-        seed: str | None = None,
-        height: int | None = None,
-        width: int | None = None,
-        seed_variation: int | None = None,
-        post_processing: list[Literal["GFPGAN", "RealESRGAN_x4plus", "CodeFormers"], ...] | None = None,
-        karras: bool | None = None,
-        tiling: bool | None = None,
-        hires_fix: bool | None = None,
-        clip_skip: int | None = None,
-        control_type: str | None = None,
-        steps: int | None = None,
-        n: int | None = None,
-    ):
-        self.sampler_name = sampler_name
-        self.cfg_scale = cfg_scale
-        self.denoising_strength = max(1.0, min(1.0, denoising_strength)) if denoising_strength is not None else None
-        self.seed = seed
-        self.height = max(64, min(3072, round(height / 64) * 64)) if height is not None else None
-        self.width = max(64, min(3072, round(width / 64) * 64)) if width is not None else None
-        self.seed_variation = max(1, min(1000, seed_variation)) if seed_variation is not None else None
-        self.post_processing = post_processing
-        self.karras = karras
-        self.tiling = tiling
-        self.hires_fix = hires_fix
-        self.clip_skip = max(1, min(12, clip_skip)) if clip_skip is not None else None
-        self.control_type = control_type
-        self.steps = max(1, min(500, steps)) if steps is not None else None
-        self.n = max(1, min(10, n)) if n is not None else None
+async def _request_with_cache(
+    *,
+    session: aiohttp.ClientSession,
+    request_args: dict,
+    cache_file_path: Path,
+    data_parser : Callable[[JSONSerializable], tuple[Any, JSONSerializable]] = lambda x: x,
+    dump_with_indent: bool = False
+) -> JSONSerializable:
+    # If a valid cache is found, we return whatever value it holds, otherwise an exception is raised and we continue
+    try:
+        assert cache_file_path.is_file()
+        async with aiofiles.open(cache_file_path, "r", encoding="utf-8") as cache_file:
+            cache_json: dict = json.loads(await cache_file.read())
+        assert cache_json.get("saved_at", 0) + 60*60*24*2 > time.time()
+        assert (data := cache_json.get("data")) is not None
+    except (AssertionError, JSONDecodeError):
+        pass
+    else:
+        with contextlib.suppress(Exception):
+            return_data, json_data = data_parser(data)
+            return return_data
 
-    def __iter__(self):
-        for attr, value in self.__dict__.items():
-            if value is not None:
-                yield attr, value
+    async with session.get(**request_args) as response:
+        data: JSONSerializable = await response.json()
+        # Using a user-supplied function here is a bit messy, but it gives us the most flexibility
+        # but since it's a private function mainly meant to be used by functions that fetch specific things, it's fine
+        return_data, json_data = data_parser(data)
+
+        async with aiofiles.open(cache_file_path, "w", encoding="utf-8") as cache_file:
+            await cache_file.write(json.dumps(
+                {
+                    "saved_at": time.time(),
+                    "data": json_data
+                },
+                indent=4 if dump_with_indent else None
+            ))
+        return return_data
 
 
-class ImageGenerationInput:
-    def __init__(
-        self,
-        prompt: str,
-        params: ImageGenerationInputParams | None = None,
-        *,
-        models: list[str] | None = None,
-        workers: list[str] | None = None,
-        nsfw: bool | None = None,
-        trusted_workers: bool | None = None,
-        censor_nsfw: bool | None = None,
-        source_image: str | None = None,
-        source_processing: str | None = None,
-        source_mask: str | None = None,
-        r2: bool | None = None,
-        shared: bool | None = None,
-    ):
-        self.prompt = prompt
-        self.params = params
-        self.workers = workers
-        self.models = models
-        self.r2 = r2
-        self.shared = shared
-        self.nsfw = nsfw
-        self.trusted_workers = trusted_workers
-        self.censor_nsfw = censor_nsfw
-        self.source_image = source_image
-        self.source_processing = source_processing
-        self.source_mask = source_mask
+async def fetch_styles(*, session: aiohttp.ClientSession, storage_file_path: Path) -> dict[str, GenerationRequest]:
+    def parse(style_data: JSONSerializable) -> GenerationRequest:
+        prompt: str = style_data.pop("prompt") # type: ignore
+        if "{np}" in prompt and "###" not in prompt:
+            prompt = prompt.replace("{np}", "###{np}")
 
-    def __iter__(self):
-        for attr, value in self.__dict__.items():
-            if isinstance(value, ImageGenerationInputParams):
-                yield attr, dict(value)
-            elif value is not None:
-                yield attr, value
+        prompts = prompt.split("###", maxsplit=1)
+        request = GenerationRequest(
+            positive_prompt=prompts[0],
+            negative_prompt=prompts[1] if len(prompts) == 2 else "",
+            models=[style_data.pop("model")] if "model" in style_data else None,
+            session=session
+        )
+
+        for key, value in style_data.items():
+            if key in GenerationRequest.model_json_schema()["properties"].keys():
+                if key == "params":
+                    setattr(request, key, GenerationParams(**value))
+                else:
+                    setattr(request, key, value)
+            elif key in GenerationParams.model_json_schema()["properties"].keys():
+                if request.params is None:
+                    request.params = GenerationParams()
+                if key == "loras":
+                    if request.params.loras is None:
+                        request.params.loras = []
+                    for lora in value:
+                        request.params.loras.append(LoRA(**lora))
+            else:
+                raise KeyError(f"Unknown style key: {key}")
+
+        return request
+
+    def data_parser(data: dict) -> tuple[Any, dict | list | str | int | float | bool | None]:
+        if not isinstance(data, dict):
+            raise ValueError("Github's API did not respond with a dictionary.")
+        if "message" in data:
+            raise RuntimeError(f"Error fetching styles from github: {data.get('message', '')}")
+
+        return_data = {key: parse(value) for key, value in data.items()}
+        json_data = {key: value.dump_json_dict() for key, value in return_data.items()}
+        return return_data, json_data
+
+    return await _request_with_cache(
+        session=session,
+        request_args={
+            "url": STYLES_URL,
+            "headers": {"Accept": "application/vnd.github.raw+json"}
+        },
+        cache_file_path=storage_file_path,
+        data_parser=data_parser
+    )
+
+async def fetch_style_categories(*, session: aiohttp.ClientSession, storage_file_path: Path) -> dict[str, list[str]]:
+    def data_parser(data: JSONSerializable) -> tuple[Any, JSONSerializable]:
+        if not isinstance(data, dict):
+            raise ValueError("Github's API did not respond with a dictionary.")
+        if not all(
+            isinstance(key, str) and all(
+                isinstance(value, str)
+                for value in values
+            )
+            for key, values in data.items()
+        ):
+            raise ValueError("The style categories supplied do not follow the format expected.")
+        return data, data
+
+    return await _request_with_cache(
+        session=session,
+        request_args={
+            "url": STYLE_CATEGORIES_URL,
+            "headers": {"Accept": "application/vnd.github.raw+json"}
+        },
+        cache_file_path=storage_file_path,
+        data_parser=data_parser
+    )
+
+async def fetch_loras(*, session: aiohttp.ClientSession, storage_file_path: Path, logger: logging.Logger) -> list[LoRA]:
+    try:
+        assert storage_file_path.is_file()
+        async with aiofiles.open(storage_file_path, "r", encoding="utf-8") as cache_file:
+            cache_json: dict = json.loads(await cache_file.read())
+        assert cache_json.get("saved_at", 0) + 60*60*24*3 > time.time()
+        assert (data := cache_json.get("data")) is not None
+        return [LoRA(**lora) for lora in data]
+    except (AssertionError, JSONDecodeError):
+        civitai_data: list[LoRA] = []
+        metadata: dict[str, Any] = {
+            "nextPage": "https://civitai.com/api/v1/models?limit=100&&types=LORA&page=1"
+        }
+        while next_page := metadata.get("nextPage"):
+            current_page = metadata.get('currentPage', 0) + 1
+            total_pages = metadata.get("totalPages", "unknown")
+            logger.debug(f"Fetching LoRAs from {next_page} (page {current_page}/{total_pages})")
+            async with session.get(next_page) as response:
+                response_json = await response.json()
+            civitai_data.extend(
+                LoRA(
+                    name=str(lora["id"]),
+                    actual_name=lora["name"],
+                    inject_trigger="any",
+                    nsfw=lora.get("nsfw", False),
+                    tags=lora.get("tags", []),
+                )
+                for lora in response_json.get("items", [])
+            )
+            metadata = response_json.get("metadata", {})
+            await asyncio.sleep(2)
+
+        async with aiofiles.open(storage_file_path, "w", encoding="utf-8") as cache_file:
+            await cache_file.write(json.dumps(
+                {
+                    "saved_at": time.time(),
+                    "data": [
+                        dict(
+                            name=lora.name,
+                            model=lora.model,
+                            clip=lora.clip,
+                            inject_trigger=lora.inject_trigger,
+                            nsfw=lora.nsfw,
+                            tags=lora.tags,
+                            actual_name=lora.actual_name,
+                        )
+                        for lora in civitai_data
+                    ]
+                }
+            ))
+        return civitai_data
 
 
-class GeneratedImage:
-    # noinspection PyShadowingBuiltins
-    def __init__(
-        self,
-        img: str,
-        id: str,
-        worker_id: str,
-        worker_name: str,
-        model: str,
-        state: str,
-        seed: str,
-        censored: str,
-    ):
-        self.img = io.BytesIO(base64.b64decode(img))
-        self.id = id
-        self.worker_id = worker_id
-        self.worker_name = worker_name
-        self.model = model
-        self.state = state
-        self.seed = seed
-        self.censored = censored
+def modify_with_style(
+    generation: GenerationRequest | GenerationParams,
+    style: GenerationRequest | GenerationParams,
+) -> GenerationRequest | GenerationParams:
+    new_generation = generation
+
+    # Overwrite generation values with style values
+    for key, value in style.model_dump(
+        exclude_defaults=True  # We don't want to overwrite stuff that's not specified in the style
+    ).items():
+        if key == "prompt":
+            new_generation.prompt = style.prompt.format(
+                p=generation.positive_prompt,
+                np=generation.negative_prompt.removeprefix(", ")
+            )
+        elif key == "params":
+            params = new_generation.params.model_dump() | value
+
+            # Convert lora dicts into LoRA objects
+            if loras := params.get("loras"):
+                params["loras"] = []
+                for lora in loras:
+                    params["loras"].append(LoRA(**lora))
+            new_generation.params = GenerationParams(**params)
+
+    return new_generation
 
 
-def remove_payload_none_values(dict_input: dict) -> dict:
-    new_dict = {}
-    for key, value in dict_input.items():
-        if isinstance(value, dict):
-            if filtered_data := remove_payload_none_values(value):
-                new_dict[key] = value | filtered_data
-        elif value is not None:
-            new_dict[key] = value
-    return new_dict
+def embed_desc_from_dict(info: dict) -> str:
+    return "".join(f"**{key}:** {value}\n" for key, value in info.items() if value is not None)
+
+
+
+

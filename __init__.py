@@ -70,7 +70,7 @@ class DiffusionModelTransformer(app_commands.Transformer):
 
 
 class StyleTransformer(app_commands.Transformer):
-    def transform(self, interaction: discord.Interaction, value: str, /) -> GenerationRequest | None:
+    def transform(self, interaction: discord.Interaction, value: str, /) -> str:
         value = value.removesuffix(" (category)").strip()
         if value in available_style_categories:
             value = random.choice(available_style_categories.get(value, []))
@@ -319,7 +319,7 @@ class StableHorde(breadcord.module.ModuleCog):
             )
         )
 
-
+    # noinspection LongLine
     @app_commands.command(description="Generates an image using Stable Diffusion",)
     @app_commands.rename(
         nsfw="is_nsfw",
@@ -360,7 +360,7 @@ class StableHorde(breadcord.module.ModuleCog):
         width: int = 512,
         height: int = 512,
         steps: int = 25,
-        style: app_commands.Transform[GenerationRequest | None, StyleTransformer] = None,
+        style: app_commands.Transform[str, StyleTransformer] = None,
         seed: str | None = None,
         cfg_scale: float = 7.5,
         post_processing: PostProcessors | None = None, # Technically supports a list of postprocessors, but too bad!

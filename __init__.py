@@ -373,6 +373,7 @@ class StableHorde(breadcord.module.ModuleCog):
         tiling: bool = False,
         hires_fix: bool = False,
         n: int = 1,
+        worker: str | None = None,  #TODO: Add a transformer
     ) -> None:
         nsfw = nsfw or lora.nsfw if lora else nsfw
 
@@ -384,6 +385,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 negative_prompt=negative_prompt,
                 nsfw=nsfw,
                 models=[model.name] if model else None,
+                workers=[worker] if worker else None,
                 source_image=b64encode(await source_image.read()) if source_image else None,
                 source_processing=source_processing if source_image else None,
                 source_mask=b64encode(await source_mask.read()) if source_processing in [

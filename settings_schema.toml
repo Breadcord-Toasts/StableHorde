@@ -8,7 +8,7 @@ stable_horde_api_key = "0000000000"
 required_deletion_votes = 2
 
 # The maximum ammount of kudos a generation request can require
-max_kudo_cost = 10.0
+max_kudo_cost = 18.0
 
 # THe time to wait inbetween fetching the generation status from the horde.
 # Try keep this as high as possible as to not overwelm the horde with requests

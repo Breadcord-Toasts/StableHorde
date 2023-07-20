@@ -11,6 +11,7 @@ import discord
 import pydantic
 from discord import app_commands
 from discord.ext import tasks, commands
+from discord.utils import escape_markdown
 
 import breadcord
 from .helpers.constants import HORDE_API_BASE
@@ -105,6 +106,12 @@ class LoRATransformer(app_commands.Transformer):
                 return lora
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+        if not value:
+            return [
+                app_commands.Choice(name=lora.actual_name.strip(), value=lora.name.strip())
+                for lora in random.sample(available_loras, 25)
+            ]
+
         return [
             app_commands.Choice(name=lora.actual_name.strip(), value=lora.name.strip())
             for lora in breadcord.helpers.search_for(
@@ -225,6 +232,9 @@ class StableHorde(breadcord.module.ModuleCog):
     ) -> None:
         lora = generation.params.loras[0] if generation.params.loras else None
         control_type = generation.params.control_type
+        generation.workers = (settings_workers
+                              if (settings_workers := self.settings.workers.value) and not generation.workers
+                              else generation.workers)
 
         if interaction.response.is_done():
             await interaction.edit_original_response(content="Starting to generate image...")
@@ -285,8 +295,8 @@ class StableHorde(breadcord.module.ModuleCog):
                             "Seed": finished_gen.seed,
                             "Model": finished_gen.model,
                             "Marked as NSFW": generation.nsfw,
-                            "Lora": f"`{lora.actual_name}` ({lora.name})" if lora else None,
-                            "ControlNet type": control_type.value.lower() if control_type else None,
+                            "Lora": f"{escape_markdown(lora.actual_name)} ({lora.name})" if lora else None,
+                            "ControlNet type": str(control_type).lower() if control_type else None,
                         })}
                         ### **Horde metadata**
                         {embed_desc_from_dict({
@@ -422,6 +432,55 @@ class StableHorde(breadcord.module.ModuleCog):
 
         await self._generate_and_send(interaction, generation, source_image=source_image)
 
+    async def remix_user_avatar(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        try:
+            await interaction.response.send_message(f"Remixing {user.display_name}'s avatar...")
+
+            avatar_resolution = 512
+            avatar = user.display_avatar.with_format("webp").with_size(avatar_resolution)
+            interrogation = InterrogationRequest(
+                forms=[InterrogationForm(name=InterrogationType.CAPTION)],
+                source_image=avatar.url,
+                session=self.session
+            )
+            queued_interrogation = await interrogation.request_interrogation()
+
+            # An interrogation request times out after 20 minutes
+            for _ in range((20 * 60) // int(self.settings.horde_api_wait_time.value)):
+                status = await queued_interrogation.fetch_status()
+                if status.state == InterrogationStatuses.DONE:
+                    break
+                await asyncio.sleep(int(self.settings.horde_api_wait_time.value))
+            else:
+                #TODO: Rename error so it fits better with interrogations AND image generations
+                raise GenerationTimeoutError()
+            prompt = next(iter(status.forms[0].result.values()))
+
+            controlnet_model: ControlType = random.choice(list(map(
+                ControlType,
+                self.settings.avatar_remix_controlnet_models.value
+            )))
+
+            generation = GenerationRequest(
+                positive_prompt=prompt,
+                # models=[model.name] if model else None,
+                source_image=b64encode(await avatar.read()),
+                params=GenerationParams(
+                    steps=20,
+                    width=avatar_resolution,
+                    height=avatar_resolution,
+                    control_type=controlnet_model.value,
+                ),
+                shared=True,
+                r2=False,
+                replacement_filter=True,
+
+                session=self.session
+            )
+            await self._generate_and_send(interaction, generation, source_image=avatar)
+        except Exception as error:
+            await self.cog_app_command_error(interaction, error)
+
     @commands.command(name="update_data")
     @commands.is_owner()
     async def update_data_command(self, ctx: commands.Context) -> None:
@@ -476,54 +535,6 @@ class StableHorde(breadcord.module.ModuleCog):
                 + (f": {error}" if str(error) else "") + f" {error.status_code}"
             )
             return
-
-    async def remix_user_avatar(self, interaction: discord.Interaction, user: discord.Member) -> None:
-        try:
-            await interaction.response.send_message(f"Remixing {user.display_name}'s avatar...")
-
-            avatar = user.display_avatar.with_format("webp").with_size(512)
-            interrogation = InterrogationRequest(
-                forms=[InterrogationForm(name=InterrogationType.CAPTION)],
-                source_image=avatar.url,
-                session=self.session
-            )
-            queued_interrogation = await interrogation.request_interrogation()
-
-            # An interrogation request times out after 20 minutes
-            for _ in range((20 * 60) // int(self.settings.horde_api_wait_time.value)):
-                status = await queued_interrogation.fetch_status()
-                if status.state == InterrogationStatuses.DONE:
-                    break
-                await asyncio.sleep(int(self.settings.horde_api_wait_time.value))
-            else:
-                #TODO: Rename error so it fits better with interrogations AND image generations
-                raise GenerationTimeoutError()
-            prompt = next(iter(status.forms[0].result.values()))
-
-            controlnet_model: ControlType = random.choice(list(map(
-                ControlType,
-                self.settings.avatar_remix_controlnet_models.value
-            )))
-
-            generation = GenerationRequest(
-                positive_prompt=prompt,
-                # models=[model.name] if model else None,
-                source_image=b64encode(await avatar.read()),
-                params=GenerationParams(
-                    steps=20,
-                    width=512,
-                    height=512,
-                    control_type=controlnet_model.value,
-                ),
-                shared=True,
-                r2=False,
-                replacement_filter=True,
-
-                session=self.session
-            )
-            await self._generate_and_send(interaction, generation, source_image=avatar)
-        except Exception as error:
-            await self.cog_app_command_error(interaction, error)
 
 
 async def setup(bot: breadcord.Bot):

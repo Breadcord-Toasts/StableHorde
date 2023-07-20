@@ -12,8 +12,12 @@ max_kudo_cost = 18.0
 
 # THe time to wait inbetween fetching the generation status from the horde.
 # Try keep this as high as possible as to not overwelm the horde with requests
-horde_api_wait_time = 6
+horde_api_wait_time = 4
 
 # A list of ControlNet models. If multiple models are given a rnadom one will be chosen when generating.
 # Available models are: canny, hed, depth, normal, openpose, seg, scribble, fakescribbles, hough
-avatar_remix_controlnet_models = ["fakescribbles"]
+avatar_remix_controlnet_models = ["canny", "depth", "fakescribbles"]
+
+# The UUIDs of workers that should be used in case no worker is explicitly set in a generation request
+workers = []
+

@@ -232,9 +232,9 @@ class StableHorde(breadcord.module.ModuleCog):
     ) -> None:
         lora = generation.params.loras[0] if generation.params.loras else None
         control_type = generation.params.control_type
-        generation.workers = (settings_workers
-                              if (settings_workers := self.settings.workers.value) and not generation.workers
-                              else generation.workers)
+        generation.workers = await self.exclude_unavailable_workers(
+            generation.workers or self.settings.workers.value
+        ) or None
 
         if interaction.response.is_done():
             await interaction.edit_original_response(content="Starting to generate image...")
@@ -486,6 +486,19 @@ class StableHorde(breadcord.module.ModuleCog):
     async def update_data_command(self, ctx: commands.Context) -> None:
         await ctx.message.add_reaction("\N{Thumbs Up Sign}")
         await self.update_data(force_update=True)
+
+    async def exclude_unavailable_workers(self, worker_ids: list[str]) -> list[str]:
+        if not worker_ids:
+            return []
+        async with self.session.get(f"{HORDE_API_BASE}/workers") as response:
+            available_workers = map(
+                lambda worker: worker.get("name"),
+                await response.json()
+            )
+        return list(filter(
+            lambda worker: worker in available_workers,
+            worker_ids
+        ))
 
     async def cog_app_command_error(
         self,

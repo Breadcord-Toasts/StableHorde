@@ -481,11 +481,43 @@ class StableHorde(breadcord.module.ModuleCog):
         except Exception as error:
             await self.cog_app_command_error(interaction, error)
 
-    @commands.command(name="update_data")
-    @commands.is_owner()
-    async def update_data_command(self, ctx: commands.Context) -> None:
-        await ctx.message.add_reaction("\N{Thumbs Up Sign}")
-        await self.update_data(force_update=True)
+    @commands.command()
+    async def get_horde_user_info(self, ctx: commands.Context, user_id: int | None) -> None:
+        user_api_endpoint = "find_user" if user_id is None else f"user/{user_id}"
+        async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
+            user_data: dict = await response.json()
+        kudos_details: dict = user_data["kudos_details"]
+        records: dict = user_data["records"]
+        created_at = int(time.time() - user_data['account_age'])
+
+        await ctx.reply(
+            embed=discord.Embed(
+                title="User info " + ("of the bot host" if user_id is None else ""),
+                description=embed_desc_from_dict({
+                    "Account name": user_data["username"].split("#")[0],
+                    "ID": user_data["id"],
+                    "Is a moderator": user_data["moderator"],
+                    "Created at": f"<t:{created_at}:F> (<t:{created_at}:R>)",
+                })
+            ).add_field(
+                name="Kudo stats",
+                value=embed_desc_from_dict({
+                    "Kudos": int(user_data["kudos"]),
+                    "Accumulated": int(kudos_details["accumulated"]),
+                    "Gifted": int(kudos_details["gifted"]),
+                    "Received": int(kudos_details["received"]),
+                    "Awarded": int(kudos_details["awarded"]),
+                })
+            ).add_field(
+                name="Usage",
+                value=embed_desc_from_dict({
+                    "Requested images": records["request"]["image"],
+                    "Requested texts": records["request"]["text"],
+                    "Requested interrogations": records["request"]["interrogation"],
+                    "Used megapixelsteps": records["usage"]["megapixelsteps"],
+                })
+            )
+        )
 
     async def exclude_unavailable_workers(self, worker_ids: list[str]) -> list[str]:
         if not worker_ids:

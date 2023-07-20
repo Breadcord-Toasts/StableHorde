@@ -19,5 +19,6 @@ horde_api_wait_time = 4
 avatar_remix_controlnet_models = ["canny", "depth", "fakescribbles"]
 
 # The UUIDs of workers that should be used in case no worker is explicitly set in a generation request
+# Max 5 can be specified
 workers = []
 

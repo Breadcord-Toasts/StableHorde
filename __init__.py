@@ -64,10 +64,9 @@ class DiffusionModelTransformer(app_commands.Transformer):
             for model in breadcord.helpers.search_for(
                 query=value,
                 objects=available_models,
-                key=lambda m: m.name,
-                threshold=60
+                key=lambda m: m
             )
-        ][:25]
+        ]
 
 
 class StyleTransformer(app_commands.Transformer):
@@ -95,7 +94,7 @@ class StyleTransformer(app_commands.Transformer):
                 objects=style_choices,
                 key=lambda style: style[0],
             )
-        ][:25]
+        ]
 
 
 class LoRATransformer(app_commands.Transformer):
@@ -117,9 +116,9 @@ class LoRATransformer(app_commands.Transformer):
             for lora in breadcord.helpers.search_for(
                 query=value,
                 objects=available_loras,
-                key=lambda lora: lora.actual_name + "\n".join(lora.tags),
+                key=lambda lora: lora.actual_name
             )
-        ][:25]
+        ]
 
 
 class DeleteButtonView(discord.ui.View):
@@ -175,7 +174,7 @@ class StableHorde(breadcord.module.ModuleCog):
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
 
     @tasks.loop(hours=12)
-    async def update_data(self, *, force_update: bool = False) -> None:
+    async def update_data(self) -> None:
         self.logger.debug("Fetching horde models")
         async with self.session.get(f"{HORDE_API_BASE}/status/models", params={"type": "image"}) as response:
             global available_models
@@ -482,7 +481,8 @@ class StableHorde(breadcord.module.ModuleCog):
             await self.cog_app_command_error(interaction, error)
 
     @commands.command()
-    async def get_horde_user_info(self, ctx: commands.Context, user_id: int | None) -> None:
+    async def get_horde_user_info(self, ctx: commands.Context, user: str | None) -> None:
+        user_id = re.search(r"\d+", user) if user else None
         user_api_endpoint = "find_user" if user_id is None else f"user/{user_id}"
         async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
             user_data: dict = await response.json()

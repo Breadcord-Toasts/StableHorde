@@ -481,9 +481,9 @@ class StableHorde(breadcord.module.ModuleCog):
             await self.cog_app_command_error(interaction, error)
 
     @commands.command()
-    async def get_horde_user_info(self, ctx: commands.Context, user: str | None) -> None:
-        user_id = re.search(r"\d+", user) if user else None
-        user_api_endpoint = "find_user" if user_id is None else f"user/{user_id}"
+    async def get_horde_user_info(self, ctx: commands.Context, user: str | None = None) -> None:
+        user_id = re.search(r"(\d+)", user) if user else None
+        user_api_endpoint = "find_user" if user_id is None else f"users/{user_id[1]}"
         async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
             user_data: dict = await response.json()
         kudos_details: dict = user_data["kudos_details"]

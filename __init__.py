@@ -474,42 +474,66 @@ class StableHorde(breadcord.module.ModuleCog):
         except Exception as error:
             await self.cog_app_command_error(interaction, error)
 
-    @commands.command()
-    async def get_horde_user_info(self, ctx: commands.Context, user: str | None = None) -> None:
+    @commands.command(aliases=["get_horde_user_info"])
+    async def horde_user_info(self, ctx: commands.Context, user: str | None = None) -> None:
         user_id = re.search(r"(\d+)", user) if user else None
         user_api_endpoint = "find_user" if user_id is None else f"users/{user_id[1]}"
         async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
             user_data: dict = await response.json()
-        kudos_details: dict = user_data["kudos_details"]
+        kudo_details: dict = user_data["kudos_details"]
         records: dict = user_data["records"]
         created_at = int(time.time() - user_data['account_age'])
 
         await ctx.reply(
             embed=discord.Embed(
                 title="User info " + ("of the bot host" if user_id is None else ""),
+                colour=discord.Colour.random(seed=user_data["id"]),
                 description=embed_desc_from_dict({
                     "Account name": user_data["username"].split("#")[0],
                     "ID": user_data["id"],
                     "Is a moderator": user_data["moderator"],
                     "Created at": f"<t:{created_at}:F> (<t:{created_at}:R>)",
+                    "Trusted": user_data["trusted"],
+                    "Flagged": user_data["flagged"] or None,
+                    "Uses OAuth": False if user_data["pseudonymous"] else None,
+                    "Worker count": user_data["worker_count"],
+                    "Workers": ", ".join(map(lambda worker: f"`{worker}`", user_data.get("worker_ids", []))) or None,
+                    "Max concurrent image requests": user_data["concurrency"],
                 })
             ).add_field(
                 name="Kudo stats",
                 value=embed_desc_from_dict({
                     "Kudos": int(user_data["kudos"]),
-                    "Accumulated": int(kudos_details["accumulated"]),
-                    "Gifted": int(kudos_details["gifted"]),
-                    "Received": int(kudos_details["received"]),
-                    "Awarded": int(kudos_details["awarded"]),
-                })
+                    "Evaluating kudos": int(evaluating_kudos)
+                                        if (evaluating_kudos := user_data.get("evaluating_kudos")) else None,
+                    "Accumulated": int(kudo_details["accumulated"]),
+                    "Gifted": int(kudo_details["gifted"]),
+                    "Received": int(kudo_details["received"]),
+                    "Awarded": int(kudo_details["awarded"]),
+                    "Gifted by admins": int(kudo_details["admin"]) or None,
+                    "Monthly": int(monthly) if (monthly := user_data.get("monthly_kudos", {}).get("amount")) else None,
+                }),
+                inline=False
             ).add_field(
                 name="Usage",
                 value=embed_desc_from_dict({
                     "Requested images": records["request"]["image"],
                     "Requested texts": records["request"]["text"],
                     "Requested interrogations": records["request"]["interrogation"],
-                    "Used megapixelsteps": records["usage"]["megapixelsteps"],
-                })
+                    "Requested megapixelsteps": records["usage"]["megapixelsteps"],
+                    "Requested tokens": records["usage"]["tokens"],
+                }),
+                inline=False,
+            ).add_field(
+                name="Contributions",
+                value=embed_desc_from_dict({
+                    "Contributed images": records["fulfillment"]["image"],
+                    "Contributed texts": records["fulfillment"]["text"],
+                    "Contributed interrogations": records["fulfillment"]["interrogation"],
+                    "Contributed megapixelsteps": records["contribution"]["megapixelsteps"],
+                    "Contributed tokens": records["contribution"]["tokens"],
+                }),
+                inline=False,
             )
         )
 

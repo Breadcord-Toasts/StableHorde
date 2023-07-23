@@ -234,8 +234,11 @@ def modify_with_style(
 
 
 def embed_desc_from_dict(info: dict) -> str:
-    return "".join(f"**{key}:** {value}\n" for key, value in info.items() if value is not None)
-
-
-
-
+    strings = []
+    for key, value in info.items():
+        if not str(value).strip():
+            strings.append("")
+            continue
+        if value is not None:
+            strings.append(f"**{key}:** {value}")
+    return "\n".join(strings)

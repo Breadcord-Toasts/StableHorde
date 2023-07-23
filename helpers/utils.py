@@ -133,7 +133,13 @@ async def fetch_style_categories(*, session: aiohttp.ClientSession, storage_file
         data_parser=data_parser
     )
 
-async def fetch_loras(*, session: aiohttp.ClientSession, storage_file_path: Path, logger: logging.Logger) -> list[LoRA]:
+async def fetch_loras(
+    *,
+    session: aiohttp.ClientSession,
+    storage_file_path: Path,
+    logger: logging.Logger,
+    max_count: int | None
+) -> list[LoRA]:
     try:
         assert storage_file_path.is_file()
         async with aiofiles.open(storage_file_path, "r", encoding="utf-8") as cache_file:
@@ -143,12 +149,25 @@ async def fetch_loras(*, session: aiohttp.ClientSession, storage_file_path: Path
         return [LoRA(**lora) for lora in data]
     except (AssertionError, JSONDecodeError):
         civitai_data: list[LoRA] = []
+
+        models_per_page = 100
         metadata: dict[str, Any] = {
-            "nextPage": "https://civitai.com/api/v1/models?limit=100&&types=LORA&page=1"
+            "nextPage": f"https://civitai.com/api/v1/models"
+                        f"?limit={models_per_page}"
+                        f"&types=LORA"
+                        f"&sort=Highest Rated"
+                        f"&nsfw=false"
+                        f"&page=1"
         }
         while next_page := metadata.get("nextPage"):
             current_page = metadata.get('currentPage', 0) + 1
+            if max_count is not None and current_page * models_per_page >= max_count:
+                break
+
             total_pages = metadata.get("totalPages", "unknown")
+            if total_pages != "unknown" and max_count is not None:
+                total_pages = min(total_pages, max_count // models_per_page)
+
             logger.debug(f"Fetching LoRAs from {next_page} (page {current_page}/{total_pages})")
             async with session.get(next_page) as response:
                 response_json = await response.json()

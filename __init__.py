@@ -32,7 +32,6 @@ available_style_categories: dict[str, list[str]] = {}
 available_loras: list[LoRA] = []
 
 
-
 class DiffusionModelTransformer(app_commands.Transformer):
     def transform(self, interaction: discord.Interaction, value: str, /) -> ActiveModel | None:
         value = re.sub(" \(\d+ workers\)$", "", value.strip())
@@ -105,12 +104,6 @@ class LoRATransformer(app_commands.Transformer):
                 return lora
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
-        if not value:
-            return [
-                app_commands.Choice(name=lora.actual_name.strip(), value=lora.name.strip())
-                for lora in random.sample(available_loras, 25)
-            ]
-
         return [
             app_commands.Choice(name=lora.actual_name.strip(), value=lora.name.strip())
             for lora in breadcord.helpers.search_for(
@@ -215,6 +208,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 session=self.session,
                 storage_file_path=self.module.storage_path / "lora_cache.json",
                 logger=self.logger,
+                max_count=int(self.settings.lora_limit.value)
             )
         except Exception as e:
             self.logger.error(f"Failed to load loras: {e}")

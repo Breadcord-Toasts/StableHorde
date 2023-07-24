@@ -240,5 +240,5 @@ def embed_desc_from_dict(info: dict) -> str:
             strings.append("")
             continue
         if value is not None:
-            strings.append(f"**{key}:** {value}")
+            strings.append(f"{key}: {value}")
     return "\n".join(strings)

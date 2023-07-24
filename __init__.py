@@ -474,66 +474,88 @@ class StableHorde(breadcord.module.ModuleCog):
         except Exception as error:
             await self.cog_app_command_error(interaction, error)
 
-    @commands.command(aliases=["get_horde_user_info"])
+    @commands.hybrid_group(name="horde_info", description="Stable horde info commands")
+    async def horde_info_group(self, ctx: commands.Context) -> None:
+        await ctx.send_help(ctx.command)
+
+    @horde_info_group.command(name="user")
     async def horde_user_info(self, ctx: commands.Context, user: str | None = None) -> None:
-        user_id = re.search(r"(\d+)", user) if user else None
-        user_api_endpoint = "find_user" if user_id is None else f"users/{user_id[1]}"
-        async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
-            user_data: dict = await response.json()
+        try:
+            if user is None:
+                user_api_endpoint = "find_user"
+            else:
+                match = re.search(r"(\d+)$", user.strip())
+                assert match is not None
+                user_api_endpoint = f"users/{match[1]}"
+
+            async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
+                user_data: dict = await response.json()
+                assert response.status == 200
+        except AssertionError:
+            await ctx.reply("Could not find that user. Make sure that you are including the correct ID.")
+            return
+
         kudo_details: dict = user_data["kudos_details"]
         records: dict = user_data["records"]
         created_at = int(time.time() - user_data['account_age'])
 
+        def cb(x) -> str | None:
+            return f"`{x}`" if str(x) else None
+
         await ctx.reply(
             embed=discord.Embed(
-                title="User info " + ("of the bot host" if user_id is None else ""),
+                title="Info about " + (f"the bot host ({user_data['username']})"
+                                       if user is None else user_data["username"]),
                 colour=discord.Colour.random(seed=user_data["id"]),
-                description=embed_desc_from_dict({
-                    "Account name": user_data["username"].split("#")[0],
-                    "ID": user_data["id"],
-                    "Is a moderator": user_data["moderator"],
-                    "Created at": f"<t:{created_at}:F> (<t:{created_at}:R>)",
-                    "Trusted": user_data["trusted"],
-                    "Flagged": user_data["flagged"] or None,
-                    "Uses OAuth": False if user_data["pseudonymous"] else None,
-                    "Worker count": user_data["worker_count"],
-                    "Workers": ", ".join(map(lambda worker: f"`{worker}`", user_data.get("worker_ids", []))) or None,
-                    "Max concurrent image requests": user_data["concurrency"],
-                })
-            ).add_field(
-                name="Kudo stats",
-                value=embed_desc_from_dict({
-                    "Kudos": int(user_data["kudos"]),
-                    "Evaluating kudos": int(evaluating_kudos)
-                                        if (evaluating_kudos := user_data.get("evaluating_kudos")) else None,
-                    "Accumulated": int(kudo_details["accumulated"]),
-                    "Gifted": int(kudo_details["gifted"]),
-                    "Received": int(kudo_details["received"]),
-                    "Awarded": int(kudo_details["awarded"]),
-                    "Gifted by admins": int(kudo_details["admin"]) or None,
-                    "Monthly": int(monthly) if (monthly := user_data.get("monthly_kudos", {}).get("amount")) else None,
-                }),
-                inline=False
-            ).add_field(
-                name="Usage",
-                value=embed_desc_from_dict({
-                    "Requested images": records["request"]["image"],
-                    "Requested texts": records["request"]["text"],
-                    "Requested interrogations": records["request"]["interrogation"],
-                    "Requested megapixelsteps": records["usage"]["megapixelsteps"],
-                    "Requested tokens": records["usage"]["tokens"],
-                }),
-                inline=False,
-            ).add_field(
-                name="Contributions",
-                value=embed_desc_from_dict({
-                    "Contributed images": records["fulfillment"]["image"],
-                    "Contributed texts": records["fulfillment"]["text"],
-                    "Contributed interrogations": records["fulfillment"]["interrogation"],
-                    "Contributed megapixelsteps": records["contribution"]["megapixelsteps"],
-                    "Contributed tokens": records["contribution"]["tokens"],
-                }),
-                inline=False,
+                description=inspect.cleandoc(f"""
+                    {embed_desc_from_dict({
+                        "Created at": f"<t:{created_at}:F> (<t:{created_at}:R>)",
+                        "Trusted": cb(user_data["trusted"]),
+                        "Flagged": cb(user_data["flagged"]) or None,
+                        "Is a moderator": cb(user_data["moderator"]),
+                        "Uses OAuth": cb(False) if user_data["pseudonymous"] else None,
+                        "Max concurrent image requests": cb(user_data["concurrency"]),
+                    })}
+                
+                    **Kudos**
+                    {embed_desc_from_dict({
+                        "Total": cb(int(user_data["kudos"])),
+                        "Evaluating": cb(int(evaluating_kudos))
+                                      if (evaluating_kudos := user_data.get("evaluating_kudos")) else None,
+                        "Accumulated": cb(int(kudo_details["accumulated"])),
+                        "Gifted": cb(int(kudo_details["gifted"])),
+                        "Received": cb(int(kudo_details["received"])),
+                        "Awarded": cb(int(kudo_details["awarded"])),
+                        "Gifted by admins": cb(int(kudo_details["admin"])) or None,
+                        "Monthly": cb(int(monthly))
+                                   if (monthly := user_data.get("monthly_kudos", {}).get("amount")) else None,
+                    })}
+                
+                    **Requested**
+                    {embed_desc_from_dict({
+                        "Images": f"{cb(records['request']['image'])} "
+                                  f"({cb(records['usage']['megapixelsteps'])} megapixelsteps)",
+                        "Texts": f"{cb(records['request']['text'])} "
+                                 f"({cb(records['usage']['tokens'])} tokens)",
+                        "Interrogations": cb(records["request"]["interrogation"]),
+                    })}
+                    
+                    **Contributed**
+                    {embed_desc_from_dict({
+                        "Images": f"{cb(records['fulfillment']['image'])} "
+                                  f"({cb(records['contribution']['megapixelsteps'])} megapixelsteps)",
+                        "Texts": f"{cb(records['fulfillment']['text'])} "
+                                 f"({cb(records['contribution']['tokens'])} tokens)",
+                        "Interrogations": cb(records["fulfillment"]["interrogation"]),
+                    })}
+                    
+                    **Workers**
+                    {embed_desc_from_dict({
+                        "Count": cb(user_data["worker_count"]),
+                        "Invited": cb(user_data["worker_invited"]),
+                        "Workers": ", ".join(map(lambda worker: cb(worker), user_data.get("worker_ids", []))) or None,
+                    })}
+                """)
             )
         )
 

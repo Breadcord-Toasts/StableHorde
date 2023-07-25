@@ -1,10 +1,11 @@
 import asyncio
-import inspect
 import io
+import math
 import random
 import re
 import time
 from base64 import b64encode, b64decode
+from collections import namedtuple
 
 import aiohttp
 import discord
@@ -24,7 +25,15 @@ from .helpers.errors import (
     GenerationTimeoutError
 )
 from .helpers.types import *
-from .helpers.utils import fetch_styles, fetch_style_categories, modify_with_style, embed_desc_from_dict, fetch_loras
+from .helpers.utils import (
+    fetch_styles,
+    fetch_style_categories,
+    modify_with_style,
+    embed_desc_from_dict,
+    fetch_loras,
+    cb,
+    clean_indented_string,
+)
 
 available_models: list[ActiveModel] = []
 available_styles: dict[str, GenerationRequest] = {}
@@ -250,7 +259,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 content="",
                 embed=discord.Embed(
                     title="Generation status",
-                    description=inspect.cleandoc(
+                    description=clean_indented_string(
                         f"""
                         **Estimated to be done <t:{round(time.time() + check.wait_time)}:R>**
                         **Position in queue:** {check.queue_position}
@@ -489,8 +498,8 @@ class StableHorde(breadcord.module.ModuleCog):
                 user_api_endpoint = f"users/{match[1]}"
 
             async with self.session.get(f"{HORDE_API_BASE}/{user_api_endpoint}") as response:
-                user_data: dict = await response.json()
                 assert response.status == 200
+                user_data: dict = await response.json()
         except AssertionError:
             await ctx.reply("Could not find that user. Make sure that you are including the correct ID.")
             return
@@ -499,15 +508,12 @@ class StableHorde(breadcord.module.ModuleCog):
         records: dict = user_data["records"]
         created_at = int(time.time() - user_data['account_age'])
 
-        def cb(x) -> str | None:
-            return f"`{x}`" if str(x) else None
-
         await ctx.reply(
             embed=discord.Embed(
                 title="Info about " + (f"the bot host ({user_data['username']})"
                                        if user is None else user_data["username"]),
                 colour=discord.Colour.random(seed=user_data["id"]),
-                description=inspect.cleandoc(f"""
+                description=clean_indented_string(f"""
                     {embed_desc_from_dict({
                         "Created at": f"<t:{created_at}:F> (<t:{created_at}:R>)",
                         "Trusted": cb(user_data["trusted"]),
@@ -553,11 +559,76 @@ class StableHorde(breadcord.module.ModuleCog):
                     {embed_desc_from_dict({
                         "Count": cb(user_data["worker_count"]),
                         "Invited": cb(user_data["worker_invited"]),
-                        "Workers": ", ".join(map(lambda worker: cb(worker), user_data.get("worker_ids", []))) or None,
+                        "Workers": ", ".join(str(cb(worker)) for worker in user_data.get("worker_ids", [])) or None,
                     })}
                 """)
             )
         )
+
+    @horde_info_group.command(name="worker")
+    async def horde_worker_info(self, ctx: commands.Context, worker_id: str) -> None:
+        async with self.session.get(f"{HORDE_API_BASE}/workers/{worker_id}") as response:
+            if response.status != 200:
+                await ctx.reply("Could not find that worker.")
+                return
+            worker_data: dict = await response.json()
+
+        worker_performance = re.match(r"^(\d+\.\d+)", worker_data["performance"])[1]
+        bridge_agent = namedtuple("BridgeAgent", ["name", "version", "url"])(
+            *worker_data["bridge_agent"].split(":", maxsplit=2)
+        )
+
+        worker_type = worker_data["type"]
+        if worker_type == "image":
+            max_pixels = worker_data["max_pixels"]
+            max_square_sides = math.floor(math.sqrt(max_pixels))
+
+        # It complains about is accessing max_pixels and max_square_sides before assignment
+        # But they will only be accessed if worker_type == "image"
+        # noinspection PyUnboundLocalVariable
+        await ctx.reply(embed=discord.Embed(
+            title=f"Info about worker {worker_data['name']}",
+            colour=discord.Colour.random(seed=worker_data["id"]),
+            description=clean_indented_string(f"""
+                {embed_desc_from_dict({
+                    "ID": cb(worker_data["id"]),
+                    "Is online": cb(worker_data["online"]),
+                    "Accepts NSFW": cb(worker_data["nsfw"]),
+                    "Trusted": cb(worker_data["trusted"]),
+                    "Flagged": cb(worker_data["flagged"]) or None,
+                    "Under maintenance": cb(worker_data["maintenance_mode"]) or None,
+                    "Bridge agent": f"`{bridge_agent.name }` `v{bridge_agent.version}`",
+                    "Worker type": cb(worker_data["type"]),
+                    "Models": ", ".join(map(lambda model: str(cb(model)), worker_data["models"])) or "none",
+                })}
+                
+                **Stats**
+                {embed_desc_from_dict({
+                    "Requests fulfilled": cb(worker_data["requests_fulfilled"]),
+                    "Kudos rewarded": cb(worker_data["kudos_rewards"]),
+                    "Megapixels generated": cb(worker_data["megapixelsteps_generated"]),
+                    "Megapixelsteps per second": cb(worker_performance),
+                    "Max pixels": cb(max_pixels) + f" (`{max_square_sides}x{max_square_sides}`)",
+                    "Uncompleted jobs": cb(worker_data["uncompleted_jobs"]),
+                }) if worker_type == "image" else embed_desc_from_dict({
+                    "Requests fulfilled": cb(worker_data["requests_fulfilled"]),
+                    "Kudos rewarded": cb(worker_data["kudos_rewards"]),
+                    "Tokens generated": cb(worker_data.get("tokens_generated")),
+                    "Tokens per second": cb(worker_performance),
+                    "Max length": cb(worker_data["max_length"]),
+                    "Max context length": cb(worker_data["max_context_length"]),
+                    "Uncompleted jobs": cb(worker_data["uncompleted_jobs"]),
+                })}
+            """ + ("" if worker_type != "image" else f"""
+                **Enabled features**
+                {embed_desc_from_dict({
+                    "Image to image": cb(worker_data["img2img"]),
+                    "Inpainting": cb(worker_data["painting"]),
+                    "LoRAs": cb(worker_data["lora"]),
+                    "Post-processing": cb(worker_data["post-processing"]),
+                })}
+            """)),
+        ))
 
     async def exclude_unavailable_workers(self, worker_ids: list[str]) -> list[str]:
         if not worker_ids:

@@ -5,7 +5,7 @@ import logging
 import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Callable, Any
+from typing import Callable, Any, Optional
 
 import aiofiles
 import aiohttp
@@ -242,3 +242,35 @@ def embed_desc_from_dict(info: dict) -> str:
         if value is not None:
             strings.append(f"{key}: {value}")
     return "\n".join(strings)
+
+def clean_indented_string(string: str) -> str:
+    return "".join(line.strip() + "\n" for line in string.splitlines()).strip()
+
+class Codeblock:
+    def __new__(cls, x: Any) -> Optional['Codeblock']:
+        return None if x is None else super().__new__(cls)
+
+    def __init__(self, x: Any):
+        self.x = x
+        self.codeblock = f"`{x}`"
+        if self.codeblock == "``":
+            raise ValueError("Codeblocks can not be empty")
+
+    def __str__(self):
+        return self.codeblock
+
+    def __bool__(self):
+        return bool(self.x)
+
+    def __add__(self, other):
+        return self.codeblock + other
+
+    def __radd__(self, other):
+        return other + self.codeblock
+
+# Codeblock
+# I know the name is bad, but it's only useful *because* it's so short
+# 4 chars against 7
+# cb() vs f"`{}`"
+def cb(x) -> Codeblock:
+    return Codeblock(x)

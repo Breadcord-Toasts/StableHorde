@@ -410,7 +410,7 @@ class StableHorde(breadcord.module.ModuleCog):
                     steps=steps,
                     width=width,
                     height=height,
-                    n=n,
+                    n=min(10, n), # Max attachments in a discord message
                     tiling=tiling,
                     hires_fix=hires_fix,
                     post_processing=post_processing,

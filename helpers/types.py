@@ -348,7 +348,7 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
             exclude_none=True,
             exclude_defaults=True,
             include=set(include) if include else None,
-            exclude=set(exclude) if exclude else None,
+            exclude=set(exclude) if exclude else "session",
         ))
 
     async def _make_request(self, dry_run: bool = False) -> QueuedGeneration | int:

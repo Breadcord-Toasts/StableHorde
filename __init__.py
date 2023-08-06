@@ -266,8 +266,8 @@ class StableHorde(breadcord.module.ModuleCog):
                         **Estimated kudo cost:** {kudo_cost}
 
                         ### Generation settings
-                        **Prompt:** {generation.positive_prompt}
-                        **Negative prompt:** {generation.negative_prompt or None}
+                        **Prompt:** {escape_markdown(generation.positive_prompt)}
+                        **Negative prompt:** {escape_markdown(generation.negative_prompt) or None}
                         **Marked as NSFW:** {generation.nsfw}
                         """
                     )
@@ -292,19 +292,20 @@ class StableHorde(breadcord.module.ModuleCog):
                     description="\n".join(
                         line.lstrip() for line in f"""
                         {embed_desc_from_dict({
-                            "Prompt": generation.positive_prompt,
-                            "Negative prompt": generation.negative_prompt or None,
+                            "Prompt": escape_markdown(generation.positive_prompt),
+                            "Negative prompt": escape_markdown(generation.negative_prompt) or None,
                             "Seed": finished_gen.seed,
-                            "Model": finished_gen.model,
+                            "Model": escape_markdown(finished_gen.model),
                             "Marked as NSFW": generation.nsfw,
                             "Lora": f"{escape_markdown(lora.actual_name)} ({lora.name})" if lora else None,
                             "ControlNet type": str(control_type).lower() if control_type else None,
-                        })}
+                        }, bold_keys=True)}
                         ### **Horde metadata**
                         {embed_desc_from_dict({
-                            "Finished by worker": f"{finished_gen.worker_name} (`{finished_gen.worker_id}`)",
+                            "Finished by worker": f"{escape_markdown(finished_gen.worker_name)} "
+                                                  f"(`{finished_gen.worker_id}`)",
                             "Total kudo cost": generation_status.kudos
-                        })}
+                        }, bold_keys=True)}
                         """.splitlines()
                     ),
                 ).set_author(

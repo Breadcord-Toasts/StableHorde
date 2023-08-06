@@ -233,14 +233,14 @@ def modify_with_style(
     return new_generation
 
 
-def embed_desc_from_dict(info: dict) -> str:
+def embed_desc_from_dict(info: dict, *, bold_keys: bool = False) -> str:
     strings = []
     for key, value in info.items():
         if not str(value).strip():
             strings.append("")
             continue
         if value is not None:
-            strings.append(f"{key}: {value}")
+            strings.append(f"**{key}**: {value}" if bold_keys else f"{key}: {value}")
     return "\n".join(strings)
 
 def clean_indented_string(string: str) -> str:

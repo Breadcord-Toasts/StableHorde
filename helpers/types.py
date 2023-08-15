@@ -470,8 +470,11 @@ class InterrogationRequest(BaseModel, extra=Extra.allow):
     )
 
     def dump_json_dict(self) -> dict:
-        return json.loads(self.model_dump_json(exclude_none=True, exclude_defaults=True))
-
+        return json.loads(self.model_dump_json(
+            exclude_none=True,
+            exclude_defaults=True,
+            exclude="session" #type: ignore
+        ))
     async def request_interrogation(self):
         async with self.session.post(
             f"{HORDE_API_BASE}/interrogate/async",

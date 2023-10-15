@@ -43,38 +43,45 @@ available_loras: list[LoRA] = []
 
 class DiffusionModelTransformer(app_commands.Transformer):
     def transform(self, interaction: discord.Interaction, value: str, /) -> ActiveModel | None:
-        value = re.sub(" \(\d+ workers\)$", "", value.strip())
+        value = re.sub(r" \(\d+ workers\)$", "", value.strip())
         for model in available_models:
             if model.name.strip() == value:
                 return model
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
-        def get_choice(model: ActiveModel) -> app_commands.Choice:
+        def to_choice(model: ActiveModel) -> app_commands.Choice:
+            versions = (
+                f"{model.name} ({model.count} workers)",
+                f"{model.name} ({model.count})",
+                model.name,
+                "⚠️ Model name too long ⚠️"
+            )
+
             return app_commands.Choice(
-                name=txt
-                if len(txt := f"{model.name} ({model.count} workers)") <= 100
-                else model.name,
+                name=next(version for version in versions if len(version) <= 100),
                 value=model.name,
             )
 
-        if not value:
-            return [
-                get_choice(model)
-                for model in sorted(
-                    filter(is_diffusion_model, available_models),
-                    key=lambda m: m.count,
-                    reverse=True
-                )[:25]
-            ]
+        processed_models = tuple(sorted(
+            filter(is_diffusion_model, available_models),
+            key=lambda m: m.count,
+            reverse=True
+        ))
 
-        return [
-            get_choice(model)
-            for model in breadcord.helpers.search_for(
-                query=value,
-                objects=available_models,
-                key=lambda m: m
-            )
-        ]
+        if not value:
+            return [to_choice(model) for model in processed_models[:25]]
+
+        models_matching_query = breadcord.helpers.search_for(
+            query=value.strip(),
+            objects=processed_models,
+            key=lambda m: m.name,
+            threshold=50
+        )
+
+        if not models_matching_query:
+            return [app_commands.Choice(name="No models found", value="")]
+
+        return [to_choice(model) for model in models_matching_query]
 
 
 class StyleTransformer(app_commands.Transformer):

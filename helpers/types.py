@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from enum import Enum
 
 import aiohttp
@@ -14,12 +15,15 @@ __all__ = [
     "ModelType",
     "SourceProcessors",
     "LoRA",
+    "TextualInversion",
+    "TextualInversionInject",
     "PostProcessors",
     "ControlType",
     "InterrogationRequest",
     "InterrogationForm",
     "InterrogationType",
-    "InterrogationStatuses"
+    "InterrogationStatuses",
+    "CivitAIData",
 ]
 
 from .constants import HORDE_API_BASE
@@ -75,16 +79,21 @@ class ControlType(Enum):
     HOUGH = "hough"
 
 
+class TextualInversionInject(Enum):
+    POSITIVE = "prompt"
+    NEGATIVE = "negprompt"
+
+
 # noinspection SpellCheckingInspection
 class LoRA(BaseModel):
     name: constr(min_length=1, max_length=255) = Field(
-        description="The exact name of the LoRa."
+        description="The exact name or CivitAI ID of the LoRa."
     )
-    model: confloat(ge=0, le=5) = Field(
+    model: confloat(ge=-5.0, le=5.0) = Field(
         1.0,
         description="The strength of the LoRa to apply to the SD model."
     )
-    clip: confloat(ge=0, le=5) = Field(
+    clip: confloat(ge=-5.0, le=5.0) = Field(
         1.0,
         description="The strength of the LoRa to apply to the clip model."
     )
@@ -102,6 +111,32 @@ class LoRA(BaseModel):
     tags: list[str] = Field([], exclude=True)
     actual_name: str = Field("", exclude=True)
 
+
+class TextualInversion(BaseModel):
+    name: constr(min_length=1, max_length=255) = Field(
+        description="The exact name or CivitAI ID of the Textual Inversion."
+    )
+    inject_ti: TextualInversionInject | None = Field(
+        None,
+        description=(
+            "If set, will automatically add this textual inversion filename "
+            "to the prompt or negative prompt accordingly using the provided strength. "
+            "If this is set to None, then the user will have to manually add the embed to the prompt themselves."
+        )
+    )
+
+    strength: confloat(ge=-5.0, le=5.0) = Field(
+        1.0,
+        description=(
+            "The strength with which to apply the textual inversion to the prompt. "
+            "Only used when inject_ti is not None"
+        )
+    )
+
+    # None of the following fields are part of the stable horde API and will be excluded in dumps
+    nsfw: bool = Field(False, exclude=True)
+    tags: list[str] = Field([], exclude=True)
+    actual_name: str = Field("", exclude=True)
 
 
 # noinspection SpellCheckingInspection
@@ -159,17 +194,12 @@ class GenerationParams(BaseModel):
     )
     facefixer_strength: confloat(ge=0, le=1) | None = None
     loras: list[LoRA] | None = None
+    tis: list[TextualInversion] | None = None
 
-    #TODO: does this actually do anything? If so, i'll need to implement somehting better than this for it
-    # Example value as provided by the docs:
-    #     "special": {
-    #       "*": {
-    #         "additionalProp1": {},
-    #         "additionalProp2": {},
-    #         "additionalProp3": {}
-    #       }
-    #     },
-    special: dict | None = None # ¯\_(ツ)_/¯
+    # This is, according to db0, used for private models hosted by the likes of stability.ai
+    # Thus, it's not documented and shouldn't (?) need to be implemented by me,
+    # a plain dict is fine if it's really needed
+    special: dict | None = None
 
     steps: conint(ge=1, le=500) = 30
     n: conint(ge=1, le=20) = Field(
@@ -182,14 +212,18 @@ class GenerationParams(BaseModel):
 class GenerationCheck(BaseModel):
     finished: int = Field(description="The amount of finished jobs in this request.")
     processing: int = Field(description="The amount of still processing jobs in this request.")
-    restarted: int = Field(description="The amount of jobs that timed out and had to be restarted or were reported as failed by a worker.")
+    restarted: int = Field(
+        description="The amount of jobs that timed out and had to be restarted or were reported as failed by a worker.")
     waiting: int = Field(description="The amount of jobs waiting to be picked up by a worker.")
     done: bool = Field(description="True when all jobs in this request are done. Else False.")
-    faulted: bool = Field(False, description="True when this request caused an internal server error and could not be completed.")
+    faulted: bool = Field(False,
+                          description="True when this request caused an internal server error and could not be completed.")
     wait_time: int = Field(description="The expected amount to wait (in seconds) to generate all jobs in this request.")
-    queue_position: int = Field(description="The position in the requests queue. This position is determined by relative Kudos amounts.")
+    queue_position: int = Field(
+        description="The position in the requests queue. This position is determined by relative Kudos amounts.")
     kudos: float = Field(description="The amount of total Kudos this request has consumed until now.")
-    is_possible: bool = Field(description="If False, this request will not be able to be completed with the pool of workers currently available.")
+    is_possible: bool = Field(
+        description="If False, this request will not be able to be completed with the pool of workers currently available.")
 
 
 class GenerationState(Enum):
@@ -359,7 +393,7 @@ class GenerationRequest(BaseModel, use_enum_values=True, extra=Extra.allow):
             response_json: dict = await response.json()
 
             match tuple(response_json.keys()):
-                case ("kudos",):
+                case ("kudos", ):
                     return response_json["kudos"]
                 case ("id", "kudos") | ("id", "kudos", "message"):
                     return QueuedGeneration(
@@ -383,6 +417,7 @@ class ModelType(Enum):
     TEXT = "text"
     IMAGE = "image"
 
+
 class ActiveModel(BaseModel):
     name: str = Field(description="The Name of a model available by workers in this horde.")
     count: int = Field(description="How many of workers in this horde are running this model.")
@@ -399,13 +434,13 @@ class InterrogationStatuses(Enum):
     DONE = "done"
 
 
-class InterrogationFormStatus(BaseModel): # I swear these names are only getting less logical
+class InterrogationFormStatus(BaseModel):  # I swear these names are only getting less logical
     form: str | None = Field(None, description="The type of interrogation this is.")
     state: str | None = Field(None, description="The overall status of this interrogation.")
 
-    #TODO: Figure out what this is
+    # TODO: Figure out what this is
     # It's somewhat similar to GenerationParams.special, but I don't know what that does either
-    result: dict | None = None # ?????????
+    result: dict | None = None  # ?????????
 
 
 class InterrogationStatus(BaseModel):
@@ -449,7 +484,7 @@ class InterrogationType(Enum):
 class InterrogationForm(BaseModel, use_enum_values=True):
     name: InterrogationType = Field(description="The type of interrogation this is.")
 
-    #TODO: Figure out what this is
+    # TODO: Figure out what this is
     # It's somewhat similar to GenerationParams.special, but I don't know what that does either
     payload: dict | None = None  # ?????????
 
@@ -473,8 +508,9 @@ class InterrogationRequest(BaseModel, extra=Extra.allow):
         return json.loads(self.model_dump_json(
             exclude_none=True,
             exclude_defaults=True,
-            exclude="session" #type: ignore
+            exclude="session"  # type: ignore
         ))
+
     async def request_interrogation(self):
         async with self.session.post(
             f"{HORDE_API_BASE}/interrogate/async",
@@ -483,7 +519,7 @@ class InterrogationRequest(BaseModel, extra=Extra.allow):
             response_json: dict = await response.json()
 
             match tuple(response_json.keys()):
-                case ("id",) | ("id", "message"):
+                case ("id", ) | ("id", "message"):
                     return QueuedInterrogation(
                         id=response_json["id"],
                         message=response_json.get("message"),
@@ -491,5 +527,11 @@ class InterrogationRequest(BaseModel, extra=Extra.allow):
                     )
                 case _:
                     raise RequestError(response_json.get("message", "Unknown error."), status_code=response.status)
+
+
+@dataclass
+class CivitAIData:
+    loras: list[LoRA]
+    textual_inversions: list[TextualInversion]
 
 

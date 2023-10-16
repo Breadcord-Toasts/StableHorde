@@ -30,7 +30,7 @@ from .helpers.utils import (
     fetch_style_categories,
     modify_with_style,
     embed_desc_from_dict,
-    fetch_loras,
+    fetch_civitai_data,
     cb,
     clean_indented_string,
 )
@@ -39,6 +39,7 @@ available_models: list[ActiveModel] = []
 available_styles: dict[str, GenerationRequest] = {}
 available_style_categories: dict[str, list[str]] = {}
 available_loras: list[LoRA] = []
+available_textual_inversions: list[TextualInversion] = []
 
 
 class DiffusionModelTransformer(app_commands.Transformer):
@@ -54,7 +55,7 @@ class DiffusionModelTransformer(app_commands.Transformer):
                 f"{model.name} ({model.count} workers)",
                 f"{model.name} ({model.count})",
                 model.name,
-                "⚠️ Model name too long ⚠️"
+                f"{model.name[:100-3]}..."
             )
 
             return app_commands.Choice(
@@ -120,13 +121,69 @@ class LoRATransformer(app_commands.Transformer):
                 return lora
 
     async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+        def to_choice(model: LoRA) -> app_commands.Choice:
+            versions = (
+                f"{model.actual_name} ({model.name})",
+                f"{model.actual_name})",
+                model.actual_name,
+                f"{model.actual_name[:100-3]}..."
+            )
+            return app_commands.Choice(
+                name=next(version for version in versions if len(version) <= 100),
+                value=model.name,
+            )
+
         return [
-            app_commands.Choice(name=lora.actual_name.strip(), value=lora.name.strip())
+            to_choice(lora)
             for lora in breadcord.helpers.search_for(
                 query=value,
                 objects=available_loras,
                 key=lambda lora: lora.actual_name
+            )[:25]
+        ]
+
+
+class TextualInversionTransformer(app_commands.Transformer):
+    def transform(self, interaction: discord.Interaction, value: str, /) -> TextualInversion | None:
+        value = value.strip()
+        for textual_inversion in available_textual_inversions:
+            if value in (textual_inversion.name, textual_inversion.actual_name.strip()):
+                return textual_inversion
+
+    async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+        def to_choice(model: TextualInversion) -> app_commands.Choice:
+            versions = (
+                f"{model.actual_name} ({model.name})",
+                f"{model.actual_name})",
+                model.actual_name,
+                f"{model.actual_name[:100-3]}..."
             )
+            return app_commands.Choice(
+                name=next(version for version in versions if len(version) <= 100),
+                value=model.name,
+            )
+
+        return [
+            to_choice(textual_inversion)
+            for textual_inversion in breadcord.helpers.search_for(
+                query=value,
+                objects=available_textual_inversions,
+                key=lambda textual_inversion: textual_inversion.actual_name
+            )[:25]
+        ]
+
+
+class TextualInversionPromptTransformer(app_commands.Transformer):
+    def transform(self, interaction: discord.Interaction, value: str, /) -> TextualInversionInject | None:
+        value = value.strip().lower()
+        if value in tuple(map(lambda inject: inject.value, TextualInversionInject)):
+            return TextualInversionInject(value)
+
+    async def autocomplete(self, interaction: discord.Interaction, value: str, /) -> list[app_commands.Choice[str]]:
+        return [
+            app_commands.Choice(name=inject.name, value=inject.value)
+            for inject in TextualInversionInject
+            if value in inject.value.lower()
         ]
 
 
@@ -176,7 +233,7 @@ class StableHorde(breadcord.module.ModuleCog):
         api_key: str = self.settings.stable_horde_api_key.value
         self.session = aiohttp.ClientSession(headers={"apikey": api_key})
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
         self.update_data.cancel()
         if self.session is not None:
             await self.session.close()
@@ -218,19 +275,21 @@ class StableHorde(breadcord.module.ModuleCog):
             self.logger.debug("Loaded style categories")
 
         global available_loras
-        self.logger.debug("Loading loras")
+        global available_textual_inversions
+        self.logger.debug("Loading civitai data")
         try:
-            available_loras = await fetch_loras(
+            civitai_data = await fetch_civitai_data(
                 session=self.session,
-                storage_file_path=self.module.storage_path / "lora_cache.json",
+                storage_file_path=self.module.storage_path / "civitai_cache.json",
                 logger=self.logger,
-                max_count=int(self.settings.lora_limit.value)
+                max_count=int(self.settings.civitai_model_limit.value)
             )
+            available_loras = civitai_data.loras
+            available_textual_inversions = civitai_data.textual_inversions
         except Exception as e:
-            self.logger.error(f"Failed to load loras: {e}")
+            self.logger.error(f"Failed to load civitai data: {e}")
         else:
-            self.logger.debug("Loaded loras")
-
+            self.logger.debug("Loaded civitai data")
 
     async def _generate_and_send(
         self,
@@ -240,6 +299,8 @@ class StableHorde(breadcord.module.ModuleCog):
         source_image: discord.Attachment | discord.Asset | None = None,
     ) -> None:
         lora = generation.params.loras[0] if generation.params.loras else None
+        textual_inversion = generation.params.tis[0] if generation.params.tis else None
+
         control_type = generation.params.control_type
         generation.workers = await self.exclude_unavailable_workers(
             generation.workers or self.settings.workers.value
@@ -288,7 +349,11 @@ class StableHorde(breadcord.module.ModuleCog):
 
         generation_status = await queued_generation.status()
         if not generation_status.generations:
-            raise MissingGenerationsError()
+            await interaction.edit_original_response(
+                content="No generations were returned by the API. Please report this to the module creator.",
+                embed=None,
+            )
+            raise MissingGenerationsError(generation_status)
 
         required_deletion_votes = int(self.settings.required_deletion_votes.value)
         await interaction.edit_original_response(
@@ -304,7 +369,11 @@ class StableHorde(breadcord.module.ModuleCog):
                             "Seed": finished_gen.seed,
                             "Model": escape_markdown(finished_gen.model),
                             "Marked as NSFW": generation.nsfw,
-                            "Lora": f"{escape_markdown(lora.actual_name)} ({lora.name})" if lora else None,
+                            "LoRA": f"{escape_markdown(lora.actual_name)} ({lora.name})" if lora else None,
+                            "Textual inversion": (
+                                f"{escape_markdown(textual_inversion.actual_name)} ({textual_inversion.name})" 
+                                if textual_inversion else None
+                            ),
                             "ControlNet type": str(control_type).lower() if control_type else None,
                         }, bold_keys=True)}
                         ### **Horde metadata**
@@ -367,7 +436,10 @@ class StableHorde(breadcord.module.ModuleCog):
         source_mask="The mask to use for in/outpainting. If left blank the source image's alpha layer will be used",
         control_type="If specified, this dictates what ControlNet model will be used on the source image",
         lora="What LoRA model to use. LoRAs allow embedding custom concepts into a generation",
-        return_control_map="Requires controlnet_model to be specified. Whether or not to return the controlnet map instead of a generated image",
+        textual_inversion="What textual inversion model to use. "
+                          "Textual inversions allows embedding custom concepts into a generation",
+        return_control_map="Requires controlnet_model to be specified. "
+                           "Whether or not to return the controlnet map instead of a generated image",
     )
     @app_commands.checks.cooldown(1, 10)
     async def imagine(
@@ -383,8 +455,11 @@ class StableHorde(breadcord.module.ModuleCog):
         style: app_commands.Transform[str, StyleTransformer] = None,
         seed: str | None = None,
         cfg_scale: float = 7.5,
-        post_processing: PostProcessors | None = None, # Technically supports a list of postprocessors, but too bad!
+        post_processing: PostProcessors | None = None,  # Technically supports a list of postprocessors, but too bad!
         lora: app_commands.Transform[LoRA | None, LoRATransformer] = None,
+        textual_inversion: app_commands.Transform[TextualInversion | None, TextualInversionTransformer] = None,
+        textual_inversion_prompt: app_commands.Transform[
+            TextualInversionInject | None, TextualInversionPromptTransformer] = None,
         source_image: discord.Attachment | None = None,
         source_processing: SourceProcessors | None = None,
         source_mask: discord.Attachment | None = None,
@@ -393,9 +468,16 @@ class StableHorde(breadcord.module.ModuleCog):
         tiling: bool = False,
         hires_fix: bool = False,
         n: int = 1,
-        worker: str | None = None,  #TODO: Add a transformer
+        worker: str | None = None,  # TODO: Add a transformer
     ) -> None:
-        nsfw = nsfw or lora.nsfw if lora else nsfw
+        nsfw = any((
+            nsfw,
+            lora and lora.nsfw,
+            textual_inversion and textual_inversion.nsfw,
+        ))
+
+        if textual_inversion and textual_inversion_prompt:
+            textual_inversion.inject_ti = textual_inversion_prompt
 
         # Cut off due to embed limits. There's no real reason to get this high with most normal prompts anyway
         positive_prompt, negative_prompt = positive_prompt[:1536], negative_prompt[:1536]
@@ -418,12 +500,13 @@ class StableHorde(breadcord.module.ModuleCog):
                     steps=steps,
                     width=width,
                     height=height,
-                    n=min(10, n), # Max attachments in a discord message
+                    n=min(10, n),  # Max attachments in a discord message
                     tiling=tiling,
                     hires_fix=hires_fix,
                     post_processing=post_processing,
                     control_type=control_type,
                     loras=[lora] if lora else None,
+                    tis=[textual_inversion] if textual_inversion else None,
                     return_control_map=return_control_map
                 ),
                 shared=True,
@@ -462,7 +545,7 @@ class StableHorde(breadcord.module.ModuleCog):
                 break
             await asyncio.sleep(int(self.settings.horde_api_wait_time.value))
         else:
-            #TODO: Rename error so it fits better with interrogations AND image generations
+            # TODO: Rename error so it fits better with interrogations AND image generations
             raise GenerationTimeoutError()
         prompt = next(iter(status.forms[0].result.values()))
 
@@ -631,6 +714,7 @@ class StableHorde(breadcord.module.ModuleCog):
                     "Image to image": cb(worker_data["img2img"]),
                     "Inpainting": cb(worker_data["painting"]),
                     "LoRAs": cb(worker_data["lora"]),
+                    "Textual inversions": cb(worker_data["ti"]),
                     "Post-processing": cb(worker_data["post-processing"]),
                 })}
             """)),

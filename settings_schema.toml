@@ -22,8 +22,6 @@ avatar_remix_controlnet_models = ["canny", "depth", "fakescribbles"]
 # Max 5 can be specified
 workers = []
 
-# How many LoRAs to cache in memory
+# How many CivitAI models to cache in memory
 # Higher numbers make take longer for the bot to fetch, and can cause issues on low memory devices
-lora_limit = 2000
-
-
+civitai_model_limit = 2000

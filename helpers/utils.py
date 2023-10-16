@@ -11,7 +11,7 @@ import aiofiles
 import aiohttp
 
 from .constants import STYLES_URL, STYLE_CATEGORIES_URL
-from .types import GenerationParams, GenerationRequest, LoRA
+from .types import GenerationParams, GenerationRequest, LoRA, TextualInversion, CivitAIData
 
 # Objects supported by json.JSONDecoder
 JSONSerializable = dict["JSONSerializable"] | list["JSONSerializable"] | str | int | float | bool | None
@@ -58,7 +58,7 @@ async def _request_with_cache(
 
 async def fetch_styles(*, session: aiohttp.ClientSession, storage_file_path: Path) -> dict[str, GenerationRequest]:
     def parse(style_data: JSONSerializable) -> GenerationRequest:
-        prompt: str = style_data.pop("prompt") # type: ignore
+        prompt: str = style_data.pop("prompt")  # type: ignore
         if "{np}" in prompt and "###" not in prompt:
             prompt = prompt.replace("{np}", "###{np}")
 
@@ -84,7 +84,13 @@ async def fetch_styles(*, session: aiohttp.ClientSession, storage_file_path: Pat
                         request.params.loras = []
                     for lora in value:
                         request.params.loras.append(LoRA(**lora))
+                if key == "tis":  # Textual inversions
+                    if request.params.tis is None:
+                        request.params.tis = []
+                    for textual_inversion in value:
+                        request.params.tis.append(TextualInversion(**textual_inversion))
             else:
+                print(style_data)
                 raise KeyError(f"Unknown style key: {key}")
 
         return request
@@ -108,6 +114,7 @@ async def fetch_styles(*, session: aiohttp.ClientSession, storage_file_path: Pat
         cache_file_path=storage_file_path,
         data_parser=data_parser
     )
+
 
 async def fetch_style_categories(*, session: aiohttp.ClientSession, storage_file_path: Path) -> dict[str, list[str]]:
     def data_parser(data: JSONSerializable) -> tuple[Any, JSONSerializable]:
@@ -133,28 +140,44 @@ async def fetch_style_categories(*, session: aiohttp.ClientSession, storage_file
         data_parser=data_parser
     )
 
-async def fetch_loras(
+
+async def fetch_civitai_data(
     *,
     session: aiohttp.ClientSession,
     storage_file_path: Path,
     logger: logging.Logger,
     max_count: int | None
-) -> list[LoRA]:
+) -> CivitAIData:
+    civitai_data: CivitAIData = CivitAIData([], [])
+
     try:
         assert storage_file_path.is_file()
         async with aiofiles.open(storage_file_path, "r", encoding="utf-8") as cache_file:
             cache_json: dict = json.loads(await cache_file.read())
+
         assert cache_json.get("saved_at", 0) + 60*60*24*3 > time.time()
         assert (data := cache_json.get("data")) is not None
-        return [LoRA(**lora) for lora in data]
+
+        loras = data.get("loras", [])
+        textual_inversions = data.get("textual_inversions", [])
+
+        civitai_data.loras = [
+            LoRA(**lora)
+            for lora in loras
+        ]
+        civitai_data.textual_inversions = [
+            TextualInversion(**textual_inversion)
+            for textual_inversion in textual_inversions
+        ]
+        return civitai_data
     except (AssertionError, JSONDecodeError):
-        civitai_data: list[LoRA] = []
 
         models_per_page = 100
         metadata: dict[str, Any] = {
             "nextPage": f"https://civitai.com/api/v1/models"
                         f"?limit={models_per_page}"
                         f"&types=LORA"
+                        f"&types=TextualInversion"
                         f"&sort=Highest Rated"
                         f"&nsfw=false"
                         f"&page=1"
@@ -168,10 +191,12 @@ async def fetch_loras(
             if total_pages != "unknown" and max_count is not None:
                 total_pages = min(total_pages, max_count // models_per_page)
 
-            logger.debug(f"Fetching LoRAs from {next_page} (page {current_page}/{total_pages})")
+            logger.debug(f'"Fetching CivitAI models from {next_page} (page {current_page}/{total_pages})"')
             async with session.get(next_page) as response:
                 response_json = await response.json()
-            civitai_data.extend(
+
+            models = response_json.get("items", [])
+            civitai_data.loras.extend(
                 LoRA(
                     name=str(lora["id"]),
                     actual_name=lora["name"],
@@ -179,8 +204,21 @@ async def fetch_loras(
                     nsfw=lora.get("nsfw", False),
                     tags=lora.get("tags", []),
                 )
-                for lora in response_json.get("items", [])
+                for lora in models
+                if lora["type"] == "LORA"
             )
+
+            civitai_data.textual_inversions.extend(
+                TextualInversion(
+                    name=str(textual_inversion["id"]),
+                    actual_name=textual_inversion["name"],
+                    nsfw=textual_inversion.get("nsfw", False),
+                    tags=textual_inversion.get("tags", []),
+                )
+                for textual_inversion in models
+                if textual_inversion["type"] == "TextualInversion"
+            )
+
             metadata = response_json.get("metadata", {})
             await asyncio.sleep(2)
 
@@ -188,19 +226,31 @@ async def fetch_loras(
             await cache_file.write(json.dumps(
                 {
                     "saved_at": time.time(),
-                    "data": [
-                        dict(
-                            name=lora.name,
-                            model=lora.model,
-                            clip=lora.clip,
-                            inject_trigger=lora.inject_trigger,
-                            nsfw=lora.nsfw,
-                            tags=lora.tags,
-                            actual_name=lora.actual_name,
-                        )
-                        for lora in civitai_data
-                    ]
-                }
+                    "data": {
+                        "loras": [
+                            dict(
+                                name=lora.name,
+                                model=lora.model,
+                                clip=lora.clip,
+                                inject_trigger=lora.inject_trigger,
+                                nsfw=lora.nsfw,
+                                tags=lora.tags,
+                                actual_name=lora.actual_name,
+                            )
+                            for lora in civitai_data.loras
+                        ],
+                        "textual_inversions": [
+                            dict(
+                                name=textual_inversion.name,
+                                nsfw=textual_inversion.nsfw,
+                                tags=textual_inversion.tags,
+                                actual_name=textual_inversion.actual_name,
+                            )
+                            for textual_inversion in civitai_data.textual_inversions
+                        ],
+                    }
+                },
+                separators=(',', ':')  # Having no spaces cuts down on file size
             ))
         return civitai_data
 
@@ -213,7 +263,7 @@ def modify_with_style(
 
     # Overwrite generation values with style values
     for key, value in style.model_dump(
-        exclude_defaults=True  # We don't want to overwrite stuff that's not specified in the style
+        exclude_defaults=True  # We don't want to overwrite stuff not specified in the style
     ).items():
         if key == "prompt":
             new_generation.prompt = style.prompt.format(
@@ -243,8 +293,10 @@ def embed_desc_from_dict(info: dict, *, bold_keys: bool = False) -> str:
             strings.append(f"**{key}**: {value}" if bold_keys else f"{key}: {value}")
     return "\n".join(strings)
 
+
 def clean_indented_string(string: str) -> str:
     return "".join(line.strip() + "\n" for line in string.splitlines()).strip()
+
 
 class Codeblock:
     def __new__(cls, x: Any) -> Optional['Codeblock']:
@@ -268,9 +320,11 @@ class Codeblock:
     def __radd__(self, other):
         return other + self.codeblock
 
-# Codeblock
-# I know the name is bad, but it's only useful *because* it's so short
-# 4 chars against 7
-# cb() vs f"`{}`"
-def cb(x) -> Codeblock:
+
+def cb(x: Any) -> Codeblock:
+    """Wrap in a codeblock
+    I know the name is bad, but it's only useful *because* it's so short
+    Four characters against seven
+    cb() vs f"`{}`"
+    """
     return Codeblock(x)
